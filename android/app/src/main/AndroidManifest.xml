@@ -1,6 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Permisos de audio, red, cámara, ubicación y notificaciones en barra de estado (Android 13+) -->
+    <!-- Permisos de audio, red, cámara, ubicación, reinicio y notificaciones en barra de estado (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <uses-permission android:name="android.permission.VIBRATE"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.INTERNET"/>
@@ -41,10 +42,25 @@
             android:name="com.google.android.geo.API_KEY"
             android:value="TU_API_KEY_DE_GOOGLE_MAPS"/>
 
+        <!-- Canal de notificaciones por defecto para mensajes push FCM -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="constructora_alertas_obras" />
+
         <!-- Recibe la alarma diaria del recordatorio de sincronización -->
         <receiver
             android:name=".RecordatorioReceiver"
             android:exported="false"/>
+
+        <!-- Reprograma la alarma diaria tras reiniciar el dispositivo -->
+        <receiver
+            android:name=".RecordatorioBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
 
         <meta-data
             android:name="flutterEmbedding"

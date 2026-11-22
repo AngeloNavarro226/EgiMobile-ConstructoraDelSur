@@ -79,9 +79,10 @@ firestore-debug.log*
 ui-debug.log*
 supabase/.temp/
 
-# Descomenta estas líneas si el repositorio es público y no quieres versionar la config de Firebase:
-# android/app/google-services.json
-# ios/Runner/GoogleService-Info.plist
-# lib/firebase_options.dart
+# Configuración de Firebase fuera de Git (repositorio público)
+android/app/google-services.json
+ios/Runner/GoogleService-Info.plist
+lib/firebase_options.dart
+.firebaserc
 
 # Nota: AGENTS.md, docs/PROJECT_CONTEXT.md y .agents/ se mantienen versionados para todo el equipo.

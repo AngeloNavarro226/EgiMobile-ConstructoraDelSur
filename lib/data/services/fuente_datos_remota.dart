@@ -11,6 +11,7 @@ class CambiosRemotos {
     this.reportes = const [],
     this.notificaciones = const [],
     this.plantillas = const [],
+    this.configuracionesRecordatorio = const [],
   });
 
   final List<Map<String, dynamic>> roles;
@@ -20,6 +21,7 @@ class CambiosRemotos {
   final List<Map<String, dynamic>> reportes;
   final List<Map<String, dynamic>> notificaciones;
   final List<Map<String, dynamic>> plantillas;
+  final List<Map<String, dynamic>> configuracionesRecordatorio;
 
   bool get estaVacio =>
       roles.isEmpty &&
@@ -28,11 +30,12 @@ class CambiosRemotos {
       tareas.isEmpty &&
       reportes.isEmpty &&
       notificaciones.isEmpty &&
-      plantillas.isEmpty;
+      plantillas.isEmpty &&
+      configuracionesRecordatorio.isEmpty;
 }
 
 /// Contrato remoto (seam) para desacoplar el motor de sincronización y los
-/// repositorios del proveedor concreto de nube (Supabase en Fase 1).
+/// repositorios del proveedor concreto de nube (Supabase).
 abstract interface class FuenteDatosRemota {
   /// Indica si la fuente remota está configurada y habilitada para operar.
   bool get estaDisponible;
@@ -46,6 +49,13 @@ abstract interface class FuenteDatosRemota {
 
   /// Inserta o actualiza un usuario en el servidor (operación idempotente).
   Future<void> upsertUsuario(Map<String, dynamic> usuario);
+
+  /// Actualiza el token FCM del usuario autenticado en el servidor (`null` al
+  /// cerrar sesión para dejar de enviar push a este dispositivo).
+  Future<void> actualizarFcmToken({
+    required String usuarioId,
+    required String? fcmToken,
+  });
 
   /// Inserta o actualiza una obra junto con sus materiales.
   Future<void> upsertObra({
@@ -63,11 +73,15 @@ abstract interface class FuenteDatosRemota {
     required List<Map<String, dynamic>> fotos,
   });
 
-  /// Inserta o actualiza una notificación en el servidor.
+  /// Inserta o actualiza una notificación en el servidor y, si corresponde,
+  /// solicita el despacho push FCM en backend.
   Future<void> upsertNotificacion(Map<String, dynamic> notificacion);
 
   /// Inserta o actualiza una plantilla del catálogo personal del ingeniero.
   Future<void> upsertPlantilla(Map<String, dynamic> plantilla);
+
+  /// Inserta o actualiza la configuración del recordatorio diario del ingeniero.
+  Future<void> upsertConfiguracionRecordatorio(Map<String, dynamic> config);
 
   /// Descarga los cambios modificados con posterioridad a [ultimaSyncUtc].
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc);
@@ -97,6 +111,12 @@ class FuenteDatosRemotaOffline implements FuenteDatosRemota {
   Future<void> upsertUsuario(Map<String, dynamic> usuario) async {}
 
   @override
+  Future<void> actualizarFcmToken({
+    required String usuarioId,
+    required String? fcmToken,
+  }) async {}
+
+  @override
   Future<void> upsertObra({
     required Map<String, dynamic> obra,
     required List<String> materiales,
@@ -117,6 +137,11 @@ class FuenteDatosRemotaOffline implements FuenteDatosRemota {
 
   @override
   Future<void> upsertPlantilla(Map<String, dynamic> plantilla) async {}
+
+  @override
+  Future<void> upsertConfiguracionRecordatorio(
+    Map<String, dynamic> config,
+  ) async {}
 
   @override
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc) async =>

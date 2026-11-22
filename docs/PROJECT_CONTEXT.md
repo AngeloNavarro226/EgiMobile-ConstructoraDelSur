@@ -16,75 +16,74 @@ Aplicación móvil Flutter para gestión de obras civiles e informes diarios de 
 
 ---
 
-## 2. Arquitectura Actual (v2.3.0 — 58 archivos en `lib/`, 4 en `test/`)
+## 2. Arquitectura Actual (v2.3.0 — 59 archivos en `lib/`, 4 en `test/`)
 
 Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de dependencias manual en `lib/main.dart`:
 
 1. **Capa de Presentación (`lib/ui/` + `lib/main.dart`):**
    - Base común: `ViewModelBase` (`lib/ui/core/view_model_base.dart`) con `EstadoOperacion` y protección `notificarSiActivo()` contra `dispose()`. Todos los ViewModels notifican explícitamente en `cargando`, `exito` y `error`.
    - `autenticacion/`: `AutenticacionViewModel` (incluye `restaurarSesion()` offline), `LoginScreen`.
-   - `obras/`: `ObrasViewModel` (carga perezosa de reportes por obra, operaciones granulares, `Reloj` + `GeneradorIds`), `InicioIngenieroScreen`, `InicioCapatazScreen`, `InicioDuenioScreen`, `AgregarObraScreen`, `CrearInformeScreen`, `DetalleObraSheet`.
-   - `notificaciones/`: `NotificacionesViewModel` (refresco automático vía `BusDeEventos`), `NotificacionesIngenieroScreen`.
+   - `obras/`: `ObrasViewModel` (carga perezosa de reportes por obra, operaciones granulares, reprogramación automática del recordatorio tras cargar/sincronizar, `Reloj` + `GeneradorIds`), `InicioIngenieroScreen`, `InicioCapatazScreen`, `InicioDuenioScreen`, `AgregarObraScreen`, `CrearInformeScreen`, `DetalleObraSheet`.
+   - `notificaciones/`: `NotificacionesViewModel` (refresco automático vía `BusDeEventos` y stream `toques`), `NotificacionesIngenieroScreen` (solo configuración del recordatorio diario por ingeniero + historial de alertas de semáforo; envío manual de prueba eliminado).
    - `exportar/`: `ExportarViewModel` (generación CSV/JSON asíncrona en `Isolate.run`), `ExportarScreen`.
    - `perfil/`: `PerfilViewModel` (`inicializarPreferencias()` + edición con `telefono`), `PerfilScreen`.
    - `core/`: `ImagenLocalORemota` (archivo local → URL remota → Base64 → asset), `ObraCard`, `Semaforo`, `AlertaSincronizacionBanner`, `SelectorUbicacionMapaDialog`, `VisorFotoInforme`.
 2. **Capa de Dominio y Plataforma (`lib/domain/models/` y `lib/plataforma/`):**
-   - Modelos inmutables (`final` + `copyWith` + metadatos `updatedAt` UTC y `syncStatus`): `EstadoSincronizacion`, `Rol`, `RolUsuario`, `Usuario` (con `telefono`), `Obra` (con `imagenUrl` y `deletedAt`), `TareaObra`, `ReporteDiario`, `FotoComprimida` (con `urlRemota` y `estadoSubida`), `NotificacionApp`, `Aviso`, `UbicacionObra`, `EventoDeApp`, `horarios.dart`.
-   - `Capacidades` (`lib/plataforma/capacidades.dart`) y `Politicas` / `PoliticaDeAvisos` (`lib/plataforma/politicas.dart`).
+   - Modelos inmutables (`final` + `copyWith` + metadatos `updatedAt` UTC y `syncStatus`): `EstadoSincronizacion`, `Rol`, `RolUsuario`, `Usuario` (con `telefono`), `Obra` (con `ingenieroId`, `tareaActualId`, `imagenUrl` y `deletedAt`), `TareaObra`, `ReporteDiario`, `FotoComprimida` (con `urlRemota` y `estadoSubida`), `NotificacionApp` (con `emisorId`), `ProgramacionRecordatorio` (por `ingenieroId`), `Aviso`, `UbicacionObra`, `EventoDeApp`, `PlantillaObra`, `horarios.dart`.
+   - `Capacidades` (`lib/plataforma/capacidades.dart`) y `Politicas` / `PoliticaDeAvisos` (`lib/plataforma/politicas.dart` — incluye `resolverDestinatariosAlertaSemaforo` y `resolverRecordatorioMasTemprano`).
 3. **Capa de Datos (`lib/data/repositories/` y `lib/data/services/`):**
-   - Repositorios (fuente de verdad + caché en memoria + `limpiarCache()`): `AutenticacionRepository`, `ObrasRepository`, `NotificacionesRepository` (destinatarios dinámicos por rol), `PreferenciasRepository` (persiste `usuario_sesion_id` offline).
-   - Servicios: `BaseDatosLocalService` (SQLite `constructora_del_sur_v4.db`, `version: 2` con `onUpgrade`, 3FN + `PRAGMA foreign_keys = ON`), `ConfiguracionSupabase` (`--dart-define` / `.env.json` ignorado en Git), `FuenteDatosRemota` / `SupabaseRemoteService` / `FuenteDatosRemotaOffline`, `ServicioAutenticacionRemota` / `SupabaseAuthService` / `ServicioAutenticacionRemotaOffline`, `MotorSincronizacion` (Push → Pull con lock, subida de fotos previa al `upsert`, reintentos en `cola_sincronizacion` y *local-pending wins*), `GeneradorIds` / `GeneradorUuidV4`, `PreferenciasService`, `MultimediaService` (guardado en archivo local en nativo sin Base64 en SQLite), `SincronizacionService` (`connectivity_plus` + `Workmanager` conectado a `SupabaseRemoteService`), `NotificacionesSistemaService`, `VozATextoService`, `MapaService`, `DescargaArchivoService`, `BusDeEventos`, `Reloj`, `plataforma_io_real.dart` / `plataforma_io_stub.dart`.
+   - Repositorios (fuente de verdad + caché en memoria + `limpiarCache()`): `AutenticacionRepository` (registra/rota/limpia `fcm_token`), `ObrasRepository`, `NotificacionesRepository` (alertas FCM por rol emisor + recordatorio por ingeniero sincronizado + reprogramación automática del equipo), `PreferenciasRepository` (persiste `usuario_sesion_id` y copia local del recordatorio en `SharedPreferencesAsync` con `allowList`).
+   - Servicios: `BaseDatosLocalService` (SQLite `constructora_del_sur_v4.db`, `version: 5` con `onUpgrade`, 3FN + `PRAGMA foreign_keys = ON`), `ConfiguracionSupabase` (`--dart-define` / `.env.json` ignorado en Git), `FuenteDatosRemota` / `SupabaseRemoteService` / `FuenteDatosRemotaOffline`, `ServicioAutenticacionRemota` / `SupabaseAuthService` / `ServicioAutenticacionRemotaOffline`, `MotorSincronizacion` (Push → Pull con lock, subida de fotos previa al `upsert`, reintentos en `cola_sincronizacion`, sincronización de `configuracion_recordatorio` y *local-pending wins*), `FirebaseNotificacionesService` (`firebase_core` + `firebase_messaging` + `NotificacionesSistemaService`), `GeneradorIds` / `GeneradorUuidV4`, `PreferenciasService`, `MultimediaService`, `SincronizacionService` (`connectivity_plus` + `Workmanager`), `NotificacionesSistemaService`, `VozATextoService`, `MapaService`, `DescargaArchivoService`, `BusDeEventos`, `Reloj`, `plataforma_io_real.dart` / `plataforma_io_stub.dart`.
 
 ---
 
-## 3. Esquema SQLite Local Actual (`constructora_del_sur_v4.db`, v4 con `onUpgrade`, 3FN + FKs)
+## 3. Esquema SQLite Local Actual (`constructora_del_sur_v4.db`, v5 con `onUpgrade`, 3FN + FKs)
 
 13 tablas relacionales normalizadas en `lib/data/services/base_datos_local_service.dart` con `PRAGMA foreign_keys = ON` e índices sobre todas las FKs y `sync_status`:
 
 1. `roles` (`id` PK, `codigo` UNIQUE, `nombre`) — catálogo con los 3 roles (`rol_ingeniero`, `rol_capataz`, `rol_duenio`).
-2. `usuarios` (`id` PK, `username` UNIQUE, `rol_id` FK → `roles.id` [relación 1:N], `nombre`, `contrasenia`, `telefono`, `updated_at`, `sync_status`).
+2. `usuarios` (`id` PK, `username` UNIQUE, `rol_id` FK → `roles.id` [relación 1:N], `nombre`, `contrasenia`, `telefono`, `fcm_token`, `updated_at`, `sync_status`).
 3. `obras` (`id` PK, `nombre`, `estado_semaforo`, `fecha_ultimo_reporte`, `responsable_id` FK → `usuarios.id`, `ingeniero_id` nullable FK → `usuarios.id` `ON DELETE SET NULL`, `tarea_actual_id` nullable FK → `tareas_obra.id` `ON DELETE SET NULL`, `ubicacion_latitud`, `ubicacion_longitud`, `ubicacion_direccion`, `observaciones`, `con_foto`, `imagen`, `imagen_url`, `finalizada`, `updated_at`, `sync_status`, `deleted_at`).
 4. `tareas_obra` (`id` PK, `obra_id` FK → `obras.id` `ON DELETE CASCADE`, `nombre`, `completada`, `orden`, `updated_at`, `sync_status`).
 5. `obra_materiales` (`id` PK AUTOINCREMENT, `obra_id` FK → `obras.id` `ON DELETE CASCADE`, `nombre`).
 6. `reportes_diarios` (`id` PK, `obra_id` FK → `obras.id` `ON DELETE CASCADE`, `autor_id` FK → `usuarios.id` `ON DELETE RESTRICT`, `fecha_creacion_local`, `fecha_sincronizacion`, `tarea_seleccionada`, `tarea_completada`, `observaciones`, `estado_semaforo`, `sync_status` [`pending`|`synced`|`error`], `obra_finalizada`, `updated_at`).
 7. `reporte_materiales` (`id` PK AUTOINCREMENT, `reporte_id` FK → `reportes_diarios.id` `ON DELETE CASCADE`, `nombre`).
 8. `reporte_fotos` (`id` PK AUTOINCREMENT, `reporte_id` FK → `reportes_diarios.id` `ON DELETE CASCADE`, `ruta_local`, `origen`, `ancho_px`, `alto_px`, `calidad_pct`, `peso_kb`, `bytes_base64`, `url_remota`, `estado_subida`).
-9. `notificaciones` (`id` PK, `obra_id` nullable FK → `obras.id` `ON DELETE SET NULL`, `titulo`, `mensaje`, `destinatario`, `fecha_hora`, `es_alerta_semaforo`, `updated_at`, `sync_status`).
-10. `configuracion_recordatorio` (`id` PK, `activo`, `hora`, `minuto`).
+9. `notificaciones` (`id` PK, `obra_id` nullable FK → `obras.id` `ON DELETE SET NULL`, `emisor_id` nullable FK → `usuarios.id` `ON DELETE SET NULL`, `titulo`, `mensaje`, `destinatario`, `fecha_hora`, `es_alerta_semaforo`, `updated_at`, `sync_status`).
+10. `configuracion_recordatorio` (`ingeniero_id` PK FK → `usuarios.id` `ON DELETE CASCADE`, `activo`, `hora`, `minuto`, `updated_at`, `sync_status`) — 1 fila por ingeniero, sincronizable con Supabase; la alarma efectiva del dispositivo se copia también en `SharedPreferences` (Dart + Android nativo) y `RecordatorioReceiver.kt` solo la dispara si `reportes_diarios` tiene filas `pending`.
 11. `estado_sincronizacion` (`id` PK, `ultima_sync_utc`) — cursor UTC para *Pull* incremental.
 12. `cola_sincronizacion` (`id` PK, `entidad`, `entidad_id`, `operacion`, `reintentos`, `ultimo_error`, `creado_en`) — trazabilidad de reintentos Push.
 13. `catalogo_plantillas` (`id` PK, `usuario_id` FK → `usuarios.id` `ON DELETE CASCADE`, `tipo` [`tarea`|`material`], `nombre`, `updated_at`, `sync_status`, `deleted_at`) — catálogo individual por ingeniero de tareas y materiales frecuentes.
 
 ### Esquema Remoto en Supabase (`EgiMobile`, `cgczsdbidvqykigxbgxg`, Postgres 17)
 
-- **10 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created`, y helpers RLS en esquema `private` (`private.usuario_actual_id`, `private.rol_codigo_actual`, `private.puede_ver_obra`, `private.puede_gestionar_obra`): `roles` (3 roles sembrados), `usuarios` (`auth_user_id` FK → `auth.users`, 3 usuarios iniciales sembrados —1 por rol—, `telefono`, `fcm_token`, sin `contrasenia`), `obras` (`responsable_id`, `ingeniero_id` nullable FK → `usuarios.id`, `tarea_actual_id` nullable FK → `tareas_obra.id`), `tareas_obra`, `obra_materiales` (alta permitida a ingeniero y capataz responsable), `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`, sin Base64), `notificaciones`, `catalogo_plantillas` (RLS individual por `usuario_id`).
-- **Storage:** bucket privado `fotos-obras` (`file_size_limit = 204800`, JPEG/PNG/WebP) con políticas RLS por rol en `storage.objects`.
-- **Realtime:** publicación `supabase_realtime` habilitada para `obras`, `tareas_obra`, `reportes_diarios`, `reporte_fotos`, `notificaciones` y `catalogo_plantillas` (consumida vía `FuenteDatosRemota.escucharCambiosRemotos()` con debounce de 1200 ms + respaldo periódico cada 45 s solo en primer plano + `RefreshIndicator`).
-- *(Las tablas `configuracion_recordatorio`, `estado_sincronizacion` y `cola_sincronizacion` son locales por dispositivo y no se replican en PostgreSQL.)*
-
-> **Nota técnica importante en `android/`:** En `proyectoegi/android/app/src/main/kotlin/` conviven `com/example/proyectoegi/MainActivity.kt` y `com/example/constructora_del_sur/{MainActivity.kt, Notificador.kt, RecordatorioReceiver.kt}`. Al configurar Firebase (`google-services.json`), verificar primero el `applicationId` exacto en `android/app/build.gradle.kt` y unificar si hay duplicación de `MainActivity.kt`.
+- **11 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created`, y helpers RLS en esquema `private`: `roles`, `usuarios` (`fcm_token`), `obras` (`responsable_id`, `ingeniero_id`, `tarea_actual_id`), `tareas_obra`, `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`), `notificaciones` (`emisor_id`, `push_enviado`), `catalogo_plantillas`, `configuracion_recordatorio` (`ingeniero_id` PK, RLS: ingeniero edita la propia, capataz lee la de los ingenieros de sus obras, dueño lee todas).
+- **Edge Function FCM (`supabase/functions/enviar-push-fcm/index.ts`):** resuelve destinatarios en servidor (Capataz → Ingeniero a cargo + Dueño; Ingeniero → Capataz a cargo + Dueño), garantiza idempotencia vía `push_enviado` y despacha con FCM HTTP v1 API usando `FIREBASE_SERVICE_ACCOUNT_JSON`.
+- **Storage:** bucket privado `fotos-obras` (`file_size_limit = 204800`, JPEG/PNG/WebP) con políticas RLS por rol.
+- **Realtime:** publicación `supabase_realtime` habilitada para `obras`, `tareas_obra`, `reportes_diarios`, `reporte_fotos`, `notificaciones`, `catalogo_plantillas` y `configuracion_recordatorio`.
+- **Android (`applicationId`):** `com.constructoradelsur.egimobile` en `android/app/build.gradle.kts` (plugin `com.google.gms.google-services` se activa automáticamente al añadir `android/app/google-services.json`); `RecordatorioAlarmas.kt` + `RecordatorioReceiver.kt` + `RecordatorioBootReceiver.kt` persisten la alarma en `SharedPreferences` y consultan SQLite antes de notificar.
 
 ---
 
 ## 4. Estado de Calidad y Red de Seguridad Actual
 
 - `analysis_options.yaml` exige 5 reglas extra sobre `flutter_lints`: `always_declare_return_types`, `directives_ordering`, `prefer_const_constructors`, `prefer_single_quotes`, `unawaited_futures` (`page_width: 80`).
-- **Tests existentes (4 archivos, 18 pruebas):**
-  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota`, `FakeServicioAutenticacionRemota`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
+- **Tests existentes (4 archivos, 22 pruebas en verde):**
+  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota`, `FakeServicioAutenticacionRemota`, `FakeServicioPushFcm`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
   - `test/plataforma_test.dart`: capacidades/políticas Android, iOS y Linux.
-  - `test/caracterizacion_y_dominio_test.dart`: avance de `Obra`, autenticación + sesión offline + Supabase Auth fake, mapeo SQLite↔Postgres de `SupabaseRemoteService`, roles 1:N + columna `telefono` + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins* + idempotencia, filtro `Finalizadas`, auditoría de `notifyListeners()` y `dispose()` seguro en los 5 ViewModels, `NotificacionesRepository` con destinatarios dinámicos, horarios, geocodificación y `Workmanager`.
-  - `test/widget_test.dart`: arranque en `LoginScreen`, validación de errores, ingreso como capataz y verificación de `telefono` visible en `PerfilScreen`.
+  - `test/caracterizacion_y_dominio_test.dart`: dominio de `Obra`, autenticación + sesión offline + Supabase Auth + ciclo de vida `fcm_token`, mapeo SQLite↔Postgres, roles 1:N + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins*, Realtime, catálogo de plantillas + tarea actual, destinatarios FCM por rol emisor (Capataz vs Ingeniero), recordatorio por ingeniero + horario más temprano en Capataz + `SharedPreferences`, auditoría de ViewModels, horarios y `Workmanager`.
+  - `test/widget_test.dart`: `LoginScreen`, `PerfilScreen`, `DetalleObraEnriquecidoSheet`, y `NotificacionesIngenieroScreen` (sin envío manual + switch de recordatorio diario).
 
 ---
 
-## 5. Roadmap Activo (Próximas 4 Fases con Agentes)
+## 5. Roadmap Activo (Próximas Fases con Agentes)
 
 | Fase | Objetivo | Estado | Skill asignada |
 | :--- | :--- | :--- | :--- |
-| **Fase 0** | **Preparación Offline-First y Escalabilidad Local:** Esquema v2 (`onUpgrade`), `telefono`, `roles 1:N`, UUID v4, `FuenteDatosRemota`, `MotorSincronizacion` Push → Pull, fotos en archivo local + visores URL, operaciones granulares, `ViewModelBase` + auditoría `notifyListeners()` | **Completado** | `refactoring_safe` |
-| **Fase 1** | **Supabase como BD principal + Offline-First:** Tablas PostgreSQL + RLS + bucket `fotos-obras` + 3 usuarios Auth (1 por rol) creados en `EgiMobile` (`cgczsdbidvqykigxbgxg`), `SupabaseRemoteService`, `SupabaseAuthService`, `ConfiguracionSupabase` (`--dart-define-from-file=.env.json`) y `AutenticacionRepository` migrado con sesión offline | **Completado** | `supabase-offline-first` |
-| **Fase 2** | **Sincronización real en producción:** `Workmanager` `callbackDispatcher` + `connectivity_plus` + `AppLifecycleListener.onResume` + `SesionIniciada` conectados a `SupabaseRemoteService` y `MotorSincronizacion` | **Completado** *(pendiente prueba manual en dispositivo real)* | `sync-engine-implementation` |
-| **Fase 3** | **Notificaciones Push reales (Firebase FCM):** Integrar `firebase_core` + `firebase_messaging`, registrar tokens FCM por usuario en Supabase y enviar push reales manteniendo `ServicioDeNotificaciones` | Pendiente | `firebase-push-notifications` |
+| **Fase 0** | **Preparación Offline-First y Escalabilidad Local:** Esquema normalizado (`onUpgrade`), `telefono`, `roles 1:N`, UUID v4, `FuenteDatosRemota`, `MotorSincronizacion`, `ViewModelBase` | **Completado** | `refactoring_safe` |
+| **Fase 1** | **Supabase como BD principal + Offline-First:** Tablas PostgreSQL + RLS + bucket `fotos-obras` + Auth + `SupabaseRemoteService` en `EgiMobile` (`cgczsdbidvqykigxbgxg`) | **Completado** | `supabase-offline-first` |
+| **Fase 2** | **Sincronización real en producción:** `Workmanager` + `connectivity_plus` + `AppLifecycleListener` + Realtime | **Completado** *(pendiente prueba manual en dispositivo real)* | `sync-engine-implementation` |
+| **Fase 3** | **Notificaciones Push reales (Firebase FCM) + Recordatorio por Ingeniero:** `firebase_core` + `firebase_messaging`, `FirebaseNotificacionesService`, destinatarios por rol emisor, `configuracion_recordatorio` por `ingeniero_id` (horario más temprano en capataz + disparo solo con pendientes + `SharedPreferences` + `BOOT_COMPLETED`), migración Supabase + `enviar-push-fcm` y eliminación de envío manual | **Implementado** *(pendiente crear proyecto `EgiMobile` en Firebase Console, copiar `google-services.json`, desplegar `enviar-push-fcm` y cargar secret `FIREBASE_SERVICE_ACCOUNT_JSON`)* | `firebase-push-notifications` |
 | **Fase 4** | **Limpieza de UI de versión de prueba:** Quitar `_TarjetaUsuariosPrueba` y `_autocompletarCredencialPrueba` de `login_screen.dart`, quitar botones de simulación y semillas demo en producción, y actualizar `test/widget_test.dart` | Pendiente | `ui-production-cleanup` |
 
 ---

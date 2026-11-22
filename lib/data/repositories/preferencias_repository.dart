@@ -3,7 +3,7 @@ import 'dart:async';
 import '../services/preferencias_service.dart';
 
 /// Repositorio que mantiene y persiste las preferencias visuales, sesión
-/// offline y borradores de la aplicación mediante [PreferenciasService].
+/// offline, borradores y copia local del recordatorio mediante [PreferenciasService].
 class PreferenciasRepository {
   PreferenciasRepository({PreferenciasService? preferenciasService})
       : _preferenciasService = preferenciasService ?? PreferenciasService();
@@ -14,6 +14,8 @@ class PreferenciasRepository {
   bool _recibirAlertasSemaforo = true;
   String _borradorObservaciones = '';
   String? _usuarioSesionId;
+  RecordatorioLocalPreferencias _recordatorioLocal =
+      const RecordatorioLocalPreferencias(activo: false, hora: 18, minuto: 0);
 
   /// Indica si el tema oscuro está activo.
   bool get modoOscuro => _modoOscuro;
@@ -28,6 +30,9 @@ class PreferenciasRepository {
   /// Identificador del usuario con sesión offline guardada.
   String? get usuarioSesionId => _usuarioSesionId;
 
+  /// Última configuración efectiva del recordatorio diario en este dispositivo.
+  RecordatorioLocalPreferencias get recordatorioLocal => _recordatorioLocal;
+
   /// Carga los valores persistidos en `SharedPreferencesAsync`.
   Future<void> inicializar() async {
     _modoOscuro = await _preferenciasService.obtenerTemaOscuro();
@@ -36,6 +41,7 @@ class PreferenciasRepository {
     _borradorObservaciones =
         await _preferenciasService.obtenerBorradorInforme();
     _usuarioSesionId = await _preferenciasService.obtenerUsuarioSesionId();
+    _recordatorioLocal = await _preferenciasService.obtenerRecordatorioLocal();
   }
 
   /// Alterna entre el tema claro y oscuro y lo persiste en disco.
@@ -75,10 +81,47 @@ class PreferenciasRepository {
     return _usuarioSesionId;
   }
 
-  /// Limpia borrador y sesión persistida al cerrar sesión.
+  /// Persiste en `SharedPreferencesAsync` la copia del recordatorio diario
+  /// efectivo programado en el dispositivo.
+  Future<void> guardarRecordatorioLocal({
+    required bool activo,
+    required int hora,
+    required int minuto,
+    String? nombreBaseDatos,
+  }) async {
+    _recordatorioLocal = RecordatorioLocalPreferencias(
+      activo: activo,
+      hora: hora,
+      minuto: minuto,
+      nombreBaseDatos: nombreBaseDatos,
+    );
+    await _preferenciasService.guardarRecordatorioLocal(
+      activo: activo,
+      hora: hora,
+      minuto: minuto,
+      nombreBaseDatos: nombreBaseDatos,
+    );
+  }
+
+  /// Marca como desactivado el recordatorio local en `SharedPreferencesAsync`.
+  Future<void> desactivarRecordatorioLocal() async {
+    await guardarRecordatorioLocal(
+      activo: false,
+      hora: _recordatorioLocal.hora,
+      minuto: _recordatorioLocal.minuto,
+      nombreBaseDatos: _recordatorioLocal.nombreBaseDatos,
+    );
+  }
+
+  /// Limpia borrador, sesión y copia del recordatorio al cerrar sesión.
   Future<void> limpiarSesion() async {
     _borradorObservaciones = '';
     _usuarioSesionId = null;
+    _recordatorioLocal = const RecordatorioLocalPreferencias(
+      activo: false,
+      hora: 18,
+      minuto: 0,
+    );
     await _preferenciasService.limpiarPreferenciasDeSesion();
   }
 }

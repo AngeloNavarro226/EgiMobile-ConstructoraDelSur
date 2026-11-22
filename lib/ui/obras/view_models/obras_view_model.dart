@@ -308,6 +308,7 @@ class ObrasViewModel extends ViewModelBase {
         forzarRecarga: forzarRecarga,
       );
       _plantillasPersonales = await _cargarPlantillasUsuarioActual();
+      await _reprogramarRecordatorioLocal();
       _estado = EstadoCargaObras.exito;
       notificarSiActivo();
     } catch (e) {
@@ -366,6 +367,7 @@ class ObrasViewModel extends ViewModelBase {
         forzarRecarga: true,
       );
       _plantillasPersonales = await _cargarPlantillasUsuarioActual();
+      await _reprogramarRecordatorioLocal();
       if (resultado.tuvoErrores) {
         _mensajeErrorSincronizacion = resultado.mensajeError;
       }
@@ -410,6 +412,7 @@ class ObrasViewModel extends ViewModelBase {
         forzarRecarga: true,
       );
       _plantillasPersonales = await _cargarPlantillasUsuarioActual();
+      await _reprogramarRecordatorioLocal();
       if (resultado.tuvoErrores) {
         _mensajeErrorSincronizacion = resultado.mensajeError;
       } else if (resultado.cambiosDescargados > 0) {
@@ -507,6 +510,7 @@ class ObrasViewModel extends ViewModelBase {
           obra: actualizada,
           motivo:
               'Cambio de semáforo en obra "${actualizada.nombre}" a ${nuevoEstado.etiqueta}.',
+          emisor: usuarioActual,
         );
       }
 
@@ -651,6 +655,15 @@ class ObrasViewModel extends ViewModelBase {
     return _obrasRepository.obtenerPlantillasUsuario(usuario.id);
   }
 
+  Future<void> _reprogramarRecordatorioLocal() async {
+    final usuario = usuarioActual;
+    if (usuario == null) return;
+    await _notificacionesRepository.sincronizarRecordatorioLocalParaUsuario(
+      usuario: usuario,
+      obras: _todasLasObras,
+    );
+  }
+
   /// Crea una nueva obra desde la vista del Ingeniero con IDs UUID v4 y UTC.
   Future<void> crearNuevaObra({
     required String nombre,
@@ -710,6 +723,7 @@ class ObrasViewModel extends ViewModelBase {
           motivo: observaciones.trim().isEmpty
               ? 'Obra creada en estado ${estadoInicial.etiqueta}.'
               : observaciones.trim(),
+          emisor: usuarioActual,
         );
       }
 
@@ -778,6 +792,7 @@ class ObrasViewModel extends ViewModelBase {
           motivo: observaciones.trim().isEmpty
               ? 'Informe diario reportó estado ${estadoSemaforo.etiqueta} en tarea "$tareaSeleccionada".'
               : observaciones.trim(),
+          emisor: usuarioActual,
         );
       }
 

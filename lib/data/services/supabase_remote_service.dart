@@ -21,6 +21,7 @@ class SupabaseRemoteService implements FuenteDatosRemota {
     'reporte_fotos',
     'notificaciones',
     'catalogo_plantillas',
+    'configuracion_recordatorio',
   ];
 
   final SupabaseClient _client;
@@ -65,6 +66,17 @@ class SupabaseRemoteService implements FuenteDatosRemota {
   Future<void> upsertUsuario(Map<String, dynamic> usuario) async {
     final payload = mapearUsuarioLocalARemoto(usuario);
     await _client.from('usuarios').upsert(payload, onConflict: 'id');
+  }
+
+  @override
+  Future<void> actualizarFcmToken({
+    required String usuarioId,
+    required String? fcmToken,
+  }) async {
+    if (!estaDisponible) return;
+    await _client
+        .from('usuarios')
+        .update({'fcm_token': fcmToken}).eq('id', usuarioId);
   }
 
   @override
@@ -155,12 +167,34 @@ class SupabaseRemoteService implements FuenteDatosRemota {
   Future<void> upsertNotificacion(Map<String, dynamic> notificacion) async {
     final payload = mapearNotificacionLocalARemoto(notificacion);
     await _client.from('notificaciones').upsert(payload, onConflict: 'id');
+
+    if (_aBooleano(notificacion['es_alerta_semaforo'])) {
+      try {
+        await _client.functions.invoke(
+          'enviar-push-fcm',
+          body: {'notificacion_id': notificacion['id']},
+        );
+      } catch (_) {
+        // Si la Edge Function o el secret FCM todavía no están listos, no
+        // bloquea la sincronización de datos en PostgreSQL.
+      }
+    }
   }
 
   @override
   Future<void> upsertPlantilla(Map<String, dynamic> plantilla) async {
     final payload = mapearPlantillaLocalARemoto(plantilla);
     await _client.from('catalogo_plantillas').upsert(payload, onConflict: 'id');
+  }
+
+  @override
+  Future<void> upsertConfiguracionRecordatorio(
+    Map<String, dynamic> config,
+  ) async {
+    final payload = mapearConfigRecordatorioLocalARemoto(config);
+    await _client
+        .from('configuracion_recordatorio')
+        .upsert(payload, onConflict: 'ingeniero_id');
   }
 
   @override
@@ -269,7 +303,7 @@ class SupabaseRemoteService implements FuenteDatosRemota {
     }
 
     final notifQuery = _client.from('notificaciones').select(
-          'id, obra_id, titulo, mensaje, destinatario, fecha_hora, '
+          'id, obra_id, emisor_id, titulo, mensaje, destinatario, fecha_hora, '
           'es_alerta_semaforo, updated_at',
         );
     final notifRaw = isoCursor != null
@@ -286,6 +320,15 @@ class SupabaseRemoteService implements FuenteDatosRemota {
         : await plantillasQuery;
     final plantillas = plantillasRaw.map(mapearPlantillaRemotaALocal).toList();
 
+    // Tabla pequeña (1 fila por ingeniero) filtrada por RLS: se descarga
+    // completa en cada Pull para que un capataz recién asignado a una obra
+    // obtenga de inmediato el horario vigente de su ingeniero.
+    final recordatoriosRaw = await _client
+        .from('configuracion_recordatorio')
+        .select('ingeniero_id, activo, hora, minuto, updated_at');
+    final configuracionesRecordatorio =
+        recordatoriosRaw.map(mapearConfigRecordatorioRemotaALocal).toList();
+
     return CambiosRemotos(
       roles: roles,
       usuarios: usuarios,
@@ -294,6 +337,7 @@ class SupabaseRemoteService implements FuenteDatosRemota {
       reportes: reportes,
       notificaciones: notificaciones,
       plantillas: plantillas,
+      configuracionesRecordatorio: configuracionesRecordatorio,
     );
   }
 
@@ -529,6 +573,7 @@ Map<String, dynamic> mapearNotificacionLocalARemoto(
     {
       'id': local['id'],
       'obra_id': local['obra_id'],
+      'emisor_id': local['emisor_id'],
       'titulo': local['titulo'],
       'mensaje': local['mensaje'],
       'destinatario': local['destinatario'],
@@ -542,11 +587,34 @@ Map<String, dynamic> mapearNotificacionRemotaALocal(
     {
       'id': remoto['id'],
       'obra_id': remoto['obra_id'],
+      'emisor_id': remoto['emisor_id'],
       'titulo': remoto['titulo'],
       'mensaje': remoto['mensaje'],
       'destinatario': remoto['destinatario'],
       'fecha_hora': remoto['fecha_hora'],
       'es_alerta_semaforo': _aEnteroSqlite(remoto['es_alerta_semaforo']),
+      'updated_at': remoto['updated_at'],
+      'sync_status': 'synced',
+    };
+
+Map<String, dynamic> mapearConfigRecordatorioLocalARemoto(
+  Map<String, dynamic> local,
+) =>
+    {
+      'ingeniero_id': local['ingeniero_id'],
+      'activo': _aBooleano(local['activo']),
+      'hora': local['hora'],
+      'minuto': local['minuto'],
+    };
+
+Map<String, dynamic> mapearConfigRecordatorioRemotaALocal(
+  Map<String, dynamic> remoto,
+) =>
+    {
+      'ingeniero_id': remoto['ingeniero_id'],
+      'activo': _aEnteroSqlite(remoto['activo']),
+      'hora': remoto['hora'] as int? ?? 18,
+      'minuto': remoto['minuto'] as int? ?? 0,
       'updated_at': remoto['updated_at'],
       'sync_status': 'synced',
     };

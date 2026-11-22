@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
@@ -10,12 +12,12 @@ import 'data/repositories/preferencias_repository.dart';
 import 'data/services/base_datos_local_service.dart';
 import 'data/services/bus_de_eventos.dart';
 import 'data/services/configuracion_supabase.dart';
+import 'data/services/firebase_notificaciones_service.dart';
 import 'data/services/fuente_datos_remota.dart';
 import 'data/services/generador_ids.dart';
 import 'data/services/mapa_service.dart';
 import 'data/services/motor_sincronizacion.dart';
 import 'data/services/multimedia_service.dart';
-import 'data/services/notificaciones_sistema_service.dart';
 import 'data/services/reloj.dart';
 import 'data/services/servicio_autenticacion_remota.dart';
 import 'data/services/sincronizacion_service.dart';
@@ -46,7 +48,14 @@ Future<void> main() async {
   const capacidades = Capacidades();
   const politicas = Politicas();
 
-  // 2. Capa de datos: Supabase (si se configuró por --dart-define) + Servicios
+  // 2. Capa de datos: Firebase (si está configurado) + Supabase + Servicios
+  try {
+    await Firebase.initializeApp();
+    FirebaseMessaging.onBackgroundMessage(firebaseMessagingBackgroundHandler);
+  } catch (e) {
+    debugPrint('[Firebase] Inicialización omitida (sin configuración): $e');
+  }
+
   final configSupabase = ConfiguracionSupabase.desdeEntorno();
   SupabaseClient? clienteSupabase;
   if (configSupabase.estaConfigurado) {
@@ -86,14 +95,21 @@ Future<void> main() async {
   );
   final vozATextoService = VozATextoService();
   final mapaService = MapaService();
-  final notificacionesSistemaService = NotificacionesSistemaService();
 
   // 3. Capa de datos: Repositorios
   final preferenciasRepository = PreferenciasRepository();
+  final firebaseNotificacionesService = FirebaseNotificacionesService(
+    debeMostrarPushEnPrimerPlano: () =>
+        preferenciasRepository.recibirAlertasSemaforo,
+  );
+  unawaited(firebaseNotificacionesService.inicializarPush());
+
   final autenticacionRepository = AutenticacionRepository(
     baseDatosService: baseDatosService,
     preferenciasRepository: preferenciasRepository,
     authRemota: authRemota,
+    fuenteRemota: fuenteDatosRemota,
+    servicioPushFcm: firebaseNotificacionesService,
     reloj: reloj,
     busDeEventos: busDeEventos,
   );
@@ -106,10 +122,12 @@ Future<void> main() async {
   );
   final notificacionesRepository = NotificacionesRepository(
     baseDatosService: baseDatosService,
-    notificacionesSistemaService: notificacionesSistemaService,
+    notificacionesSistemaService: firebaseNotificacionesService,
     reloj: reloj,
     generadorIds: generadorIds,
     autenticacionRepository: autenticacionRepository,
+    preferenciasRepository: preferenciasRepository,
+    motorSincronizacion: motorSincronizacion,
     busDeEventos: busDeEventos,
   );
 
@@ -259,10 +277,13 @@ class PantallaPrincipalPorRol extends StatefulWidget {
 class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
   int _indice = 0;
   late final AppLifecycleListener _lifecycleListener;
+  StreamSubscription<String>? _suscripcionToquesPush;
 
   @override
   void initState() {
     super.initState();
+    _suscripcionToquesPush =
+        widget.notificacionesViewModel.toques.listen(_manejarToqueNotificacion);
     _lifecycleListener = AppLifecycleListener(
       onResume: () {
         if (widget.autenticacionViewModel.tieneSesionActiva) {
@@ -279,8 +300,23 @@ class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
     );
   }
 
+  void _manejarToqueNotificacion(String destino) {
+    if (!mounted) return;
+    final rol = widget.autenticacionViewModel.usuarioActual?.rol.tipo;
+    if (destino == 'notificaciones' && rol == RolUsuario.ingeniero) {
+      setState(() => _indice = 3);
+      unawaited(widget.notificacionesViewModel.cargar());
+      return;
+    }
+    if (destino.startsWith('obra:')) {
+      setState(() => _indice = 0);
+      unawaited(widget.obrasViewModel.refrescarManual());
+    }
+  }
+
   @override
   void dispose() {
+    unawaited(_suscripcionToquesPush?.cancel());
     _lifecycleListener.dispose();
     super.dispose();
   }

@@ -340,6 +340,34 @@ class MotorSincronizacion {
         }
       }
 
+      // 5c. Push configuraciones de recordatorio diario por ingeniero pendientes
+      for (final config in await _local
+          .obtenerPendientesDeTabla('configuracion_recordatorio')) {
+        final ingenieroId = config['ingeniero_id'] as String;
+        try {
+          await _remoto.upsertConfiguracionRecordatorio(config);
+          await _local.marcarEntidadSincronizada(
+            tabla: 'configuracion_recordatorio',
+            id: ingenieroId,
+          );
+          await _local.limpiarFalloSincronizacion(
+            entidad: 'configuracion_recordatorio',
+            entidadId: ingenieroId,
+          );
+          sincronizados++;
+        } catch (e) {
+          await _local.registrarFalloSincronizacion(
+            entidad: 'configuracion_recordatorio',
+            entidadId: ingenieroId,
+            operacion: 'upsert',
+            error: e.toString(),
+          );
+          registrarError(
+            'Error al sincronizar recordatorio de $ingenieroId: $e',
+          );
+        }
+      }
+
       // 6. Pull incremental respetando local-pending wins (con margen de 60 s
       // para absorber desfases de reloj entre dispositivos y PostgreSQL)
       var descargados = 0;
@@ -495,6 +523,21 @@ class MotorSincronizacion {
       }
       await _local
           .guardarPlantillaCruda({...plantilla, 'sync_status': 'synced'});
+      aplicados++;
+    }
+
+    for (final config in cambios.configuracionesRecordatorio) {
+      final ingenieroId = config['ingeniero_id'] as String;
+      if (await _local.estaPendienteLocal(
+        tabla: 'configuracion_recordatorio',
+        id: ingenieroId,
+      )) {
+        continue;
+      }
+      await _local.guardarConfiguracionRecordatorioCruda({
+        ...config,
+        'sync_status': 'synced',
+      });
       aplicados++;
     }
 

@@ -560,7 +560,7 @@ void main() {
   );
 
   test(
-    'NotificacionesRepository usa PoliticaDeAvisos, destinatarios dinámicos y NotificacionesFalsas',
+    'NotificacionesRepository resuelve destinatarios FCM según rol emisor (Capataz vs Ingeniero) y respeta PoliticaDeAvisos',
     () async {
       final db = BaseDatosLocalService();
       final authRepo = AutenticacionRepository(baseDatosService: db);
@@ -572,13 +572,19 @@ void main() {
         autenticacionRepository: authRepo,
       );
 
+      final usuarios = await authRepo.obtenerUsuarios();
+      final capataz = usuarios.firstWhere((u) => u.id == 'u_capataz');
+      final ingeniero = usuarios.firstWhere((u) => u.id == 'u_ingeniero');
+
       final obraVerde = Obra(
         id: '10',
         nombre: 'Obra Verde',
         estado: EstadoObra.aTiempo,
         fechaUltimoReporte: DateTime.utc(2026, 10, 15),
         responsableId: 'u_capataz',
-        responsableNombre: 'Capataz',
+        responsableNombre: 'Carlos Méndez (Capataz)',
+        ingenieroId: 'u_ingeniero',
+        ingenieroNombre: 'Ing. Braulio Hormigón',
         tareas: const [],
         materiales: const [],
         ubicacion: const UbicacionObra(
@@ -587,21 +593,48 @@ void main() {
           direccion: 'Mendoza',
         ),
       );
-      await repo.emitirAlertaCambioSemaforo(
+      final alertaVerde = await repo.emitirAlertaCambioSemaforo(
         obra: obraVerde,
         motivo: 'En término',
+        emisor: capataz,
       );
+      expect(alertaVerde, isNull);
       expect(notifFalsas.mostradas, isEmpty);
 
+      // 1. Cambio hecho por Capataz -> notifica al Ingeniero a cargo y al Dueño
       final obraRoja = obraVerde.copyWith(estado: EstadoObra.problemas);
-      final alerta = await repo.emitirAlertaCambioSemaforo(
+      final alertaDesdeCapataz = await repo.emitirAlertaCambioSemaforo(
         obra: obraRoja,
         motivo: 'Falta de insumos',
+        emisor: capataz,
       );
-      expect(notifFalsas.mostradas.length, 1);
-      expect(notifFalsas.mostradas.first.alTocar, 'obra:10');
-      expect(alerta?.destinatario, contains('Ing. Braulio Hormigón'));
-      expect(alerta?.destinatario, contains('Roberto Del Sur'));
+      expect(alertaDesdeCapataz, isNotNull);
+      expect(alertaDesdeCapataz!.emisorId, 'u_capataz');
+      expect(
+          alertaDesdeCapataz.destinatario, contains('Ing. Braulio Hormigón'));
+      expect(alertaDesdeCapataz.destinatario, contains('Roberto Del Sur'));
+      expect(alertaDesdeCapataz.destinatario, isNot(contains('Carlos Méndez')));
+      // No muestra notificación local falsa al propio emisor
+      expect(notifFalsas.mostradas, isEmpty);
+
+      // 2. Cambio hecho por Ingeniero -> notifica al Capataz a cargo y al Dueño
+      final obraAmarilla = obraVerde.copyWith(estado: EstadoObra.demorada);
+      final alertaDesdeIngeniero = await repo.emitirAlertaCambioSemaforo(
+        obra: obraAmarilla,
+        motivo: 'Demora en entrega de proveedor',
+        emisor: ingeniero,
+      );
+      expect(alertaDesdeIngeniero, isNotNull);
+      expect(alertaDesdeIngeniero!.emisorId, 'u_ingeniero');
+      expect(
+        alertaDesdeIngeniero.destinatario,
+        contains('Carlos Méndez (Capataz)'),
+      );
+      expect(alertaDesdeIngeniero.destinatario, contains('Roberto Del Sur'));
+      expect(
+        alertaDesdeIngeniero.destinatario,
+        isNot(contains('Ing. Braulio Hormigón')),
+      );
 
       await notifFalsas.dispose();
     },
@@ -1232,6 +1265,191 @@ void main() {
       await remoto.dispose();
       await notifFalsas.dispose();
       await bus.dispose();
+    },
+  );
+
+  test(
+    'Recordatorio diario por ingeniero: aislamiento entre ingenieros, horario más temprano en Capataz, SharedPreferences y Push/Pull',
+    () async {
+      final reloj = RelojFijo(DateTime.utc(2026, 11, 22, 19, 0));
+      final db = BaseDatosLocalService(reloj: reloj);
+      final prefs = PreferenciasRepository();
+      final bus = BusDeEventos();
+      final remoto = FakeFuenteDatosRemota();
+      final motor = MotorSincronizacion(
+        baseDatosLocal: db,
+        fuenteRemota: remoto,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefs,
+        fuenteRemota: remoto,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        reloj: reloj,
+        autenticacionRepository: authRepo,
+        preferenciasRepository: prefs,
+        motorSincronizacion: motor,
+        busDeEventos: bus,
+      );
+
+      // Agregamos un segundo ingeniero para verificar aislamiento y horario más temprano
+      await db.guardarUsuarioCrudo({
+        'id': 'u_ing_2',
+        'username': 'ingeniero2',
+        'rol_id': 'rol_ingeniero',
+        'nombre': 'Ing. Sofía Acero',
+        'contrasenia': '1234',
+        'telefono': '+54 9 261 555-0190',
+        'updated_at': reloj.ahora().toIso8601String(),
+        'sync_status': 'synced',
+      });
+
+      // Ing. 1 configura 18:30 y hace Push a remoto
+      final cfgIng1 = await notifRepo.actualizarProgramacionRecordatorio(
+        ingenieroId: 'u_ingeniero',
+        activo: true,
+        hora: 18,
+        minuto: 30,
+      );
+      expect(cfgIng1.horarioFormateado, '18:30');
+      expect(prefs.recordatorioLocal.activo, isTrue);
+      expect(prefs.recordatorioLocal.hora, 18);
+      expect(prefs.recordatorioLocal.minuto, 30);
+      expect(
+        notifFalsas.ultimaBaseDatosRecordatorio,
+        BaseDatosLocalService.nombreArchivoDb,
+      );
+
+      // actualizarProgramacionRecordatorio ya disparó Push automático en segundo plano
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(
+        remoto.configuracionesRecordatorioRemotas['u_ingeniero']?['hora'],
+        18,
+      );
+      expect(
+        remoto.configuracionesRecordatorioRemotas['u_ingeniero']?['minuto'],
+        30,
+      );
+
+      // Pull descarga la configuración de Ing. 2 a las 17:15 sin pisar a Ing. 1
+      remoto.cambiosParaPull = CambiosRemotos(
+        configuracionesRecordatorio: [
+          {
+            'ingeniero_id': 'u_ing_2',
+            'activo': 1,
+            'hora': 17,
+            'minuto': 15,
+            'updated_at': reloj.ahora().toIso8601String(),
+            'sync_status': 'synced',
+          },
+        ],
+      );
+      await motor.sincronizarTodo(permitirSimulacionLocal: false);
+
+      final recIng1 = await notifRepo.obtenerProgramacionRecordatorio(
+        ingenieroId: 'u_ingeniero',
+      );
+      final recIng2 = await notifRepo.obtenerProgramacionRecordatorio(
+        ingenieroId: 'u_ing_2',
+      );
+      expect(recIng1.horarioFormateado, '18:30');
+      expect(recIng2.horarioFormateado, '17:15');
+
+      // Capataz con obras de ambos ingenieros -> debe elegir el horario más temprano (17:15)
+      final usuarios = await authRepo.obtenerUsuarios(forzarRecarga: true);
+      final capataz = usuarios.firstWhere((u) => u.id == 'u_capataz');
+      final duenio = usuarios.firstWhere((u) => u.id == 'u_duenio');
+
+      final obraDeIng1 = Obra(
+        id: 'o_ing1',
+        nombre: 'Obra Ing 1',
+        estado: EstadoObra.aTiempo,
+        fechaUltimoReporte: reloj.ahora(),
+        responsableId: 'u_capataz',
+        responsableNombre: capataz.nombre,
+        ingenieroId: 'u_ingeniero',
+        tareas: const [],
+        materiales: const [],
+        ubicacion: const UbicacionObra(
+          latitud: -32.88,
+          longitud: -68.84,
+          direccion: 'Mendoza',
+        ),
+      );
+      final obraDeIng2 = obraDeIng1.copyWith(
+        nombre: 'Obra Ing 2',
+        ingenieroId: 'u_ing_2',
+      );
+
+      final efectivoCapataz =
+          await notifRepo.sincronizarRecordatorioLocalParaUsuario(
+        usuario: capataz,
+        obras: [obraDeIng1, obraDeIng2],
+      );
+      expect(efectivoCapataz?.horarioFormateado, '17:15');
+      expect(notifFalsas.recordatoriosProgramados.last, (17, 15));
+      expect(prefs.recordatorioLocal.activo, isTrue);
+      expect(prefs.recordatorioLocal.hora, 17);
+      expect(prefs.recordatorioLocal.minuto, 15);
+
+      // Si el Dueño sincroniza, cancela la alarma local
+      notifFalsas.recordatorioCancelado = false;
+      final efectivoDuenio =
+          await notifRepo.sincronizarRecordatorioLocalParaUsuario(
+        usuario: duenio,
+        obras: [obraDeIng1, obraDeIng2],
+      );
+      expect(efectivoDuenio, isNull);
+      expect(notifFalsas.recordatorioCancelado, isTrue);
+      expect(prefs.recordatorioLocal.activo, isFalse);
+
+      await remoto.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  test(
+    'AutenticacionRepository registra, rota y limpia fcm_token en login, refresh y logout',
+    () async {
+      final db = BaseDatosLocalService();
+      final prefs = PreferenciasRepository();
+      final remoto = FakeFuenteDatosRemota();
+      final pushFake = FakeServicioPushFcm(tokenActual: 'fcm_token_inicial');
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefs,
+        fuenteRemota: remoto,
+        servicioPushFcm: pushFake,
+      );
+
+      final user = await authRepo.iniciarSesion(
+        identificador: 'capataz',
+        contrasenia: '1234',
+      );
+      expect(user, isNotNull);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(remoto.fcmTokensRemotos['u_capataz'], 'fcm_token_inicial');
+
+      pushFake.simularRotacionToken('fcm_token_rotado');
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(remoto.fcmTokensRemotos['u_capataz'], 'fcm_token_rotado');
+
+      await authRepo.cerrarSesion();
+      expect(remoto.fcmTokensRemotos['u_capataz'], isNull);
+      expect(pushFake.tokenEliminado, isTrue);
+
+      await authRepo.dispose();
+      await pushFake.dispose();
+      await remoto.dispose();
     },
   );
 }

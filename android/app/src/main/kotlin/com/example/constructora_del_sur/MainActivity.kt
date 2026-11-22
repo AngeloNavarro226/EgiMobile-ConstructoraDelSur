@@ -1,21 +1,16 @@
 package com.example.constructora_del_sur
 
 import android.Manifest
-import android.app.AlarmManager
 import android.app.NotificationManager
-import android.app.PendingIntent
-import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
-import java.util.Calendar
 
 class MainActivity : FlutterActivity() {
     companion object {
-        const val ID_RECORDATORIO = 90002
+        const val ID_RECORDATORIO = RecordatorioAlarmas.ID_RECORDATORIO
         private const val CODIGO_PERMISO_NOTIFICACIONES = 2026
     }
 
@@ -47,12 +42,22 @@ class MainActivity : FlutterActivity() {
                         val hora = llamada.argument<Int>("hora") ?: 18
                         val minuto = llamada.argument<Int>("minuto") ?: 0
                         val titulo = llamada.argument<String>("titulo") ?: "Constructora Del Sur"
-                        val mensaje = llamada.argument<String>("mensaje") ?: ""
-                        programarRecordatorio(hora, minuto, titulo, mensaje)
+                        val mensaje = llamada.argument<String>("mensaje")
+                            ?: "Abrí la app para sincronizar los reportes del día."
+                        val nombreBaseDatos = llamada.argument<String>("nombreBaseDatos")
+                            ?: RecordatorioAlarmas.DB_POR_DEFECTO
+                        RecordatorioAlarmas.programar(
+                            contexto = this,
+                            hora = hora,
+                            minuto = minuto,
+                            titulo = titulo,
+                            mensaje = mensaje,
+                            nombreBaseDatos = nombreBaseDatos,
+                        )
                         resultado.success(true)
                     }
                     "cancelarRecordatorio" -> {
-                        cancelarRecordatorio()
+                        RecordatorioAlarmas.cancelar(this)
                         resultado.success(true)
                     }
                     else -> resultado.notImplemented()
@@ -95,39 +100,5 @@ class MainActivity : FlutterActivity() {
             respuestaPermisoPendiente?.success(concedido)
             respuestaPermisoPendiente = null
         }
-    }
-
-    private fun intentRecordatorio(titulo: String, mensaje: String): PendingIntent {
-        val intent = Intent(this, RecordatorioReceiver::class.java).apply {
-            putExtra("titulo", titulo)
-            putExtra("mensaje", mensaje)
-        }
-        return PendingIntent.getBroadcast(
-            this, ID_RECORDATORIO, intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-    }
-
-    /** Alarma diaria inexacta (no necesita permiso de alarmas exactas; Android puede correrla unos minutos). */
-    private fun programarRecordatorio(hora: Int, minuto: Int, titulo: String, mensaje: String) {
-        val alarmas = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val proxima = Calendar.getInstance().apply {
-            set(Calendar.HOUR_OF_DAY, hora)
-            set(Calendar.MINUTE, minuto)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-            if (timeInMillis <= System.currentTimeMillis()) add(Calendar.DAY_OF_YEAR, 1)
-        }
-        alarmas.setInexactRepeating(
-            AlarmManager.RTC_WAKEUP,
-            proxima.timeInMillis,
-            AlarmManager.INTERVAL_DAY,
-            intentRecordatorio(titulo, mensaje)
-        )
-    }
-
-    private fun cancelarRecordatorio() {
-        val alarmas = getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarmas.cancel(intentRecordatorio("", ""))
     }
 }

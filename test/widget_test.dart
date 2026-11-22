@@ -12,6 +12,7 @@ import 'package:constructora_del_sur/main.dart';
 import 'package:constructora_del_sur/ui/autenticacion/view_models/autenticacion_view_model.dart';
 import 'package:constructora_del_sur/ui/exportar/view_models/exportar_view_model.dart';
 import 'package:constructora_del_sur/ui/notificaciones/view_models/notificaciones_view_model.dart';
+import 'package:constructora_del_sur/ui/notificaciones/widgets/notificaciones_ingeniero_screen.dart';
 import 'package:constructora_del_sur/ui/obras/view_models/obras_view_model.dart';
 import 'package:constructora_del_sur/ui/obras/widgets/detalle_obra_sheet.dart';
 import 'package:constructora_del_sur/ui/perfil/view_models/perfil_view_model.dart';
@@ -212,6 +213,74 @@ void main() {
       );
 
       obrasVm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  testWidgets(
+    'NotificacionesIngenieroScreen oculta envío manual y permite configurar el recordatorio diario',
+    (tester) async {
+      final bus = BusDeEventos();
+      final db = BaseDatosLocalService();
+      final prefsRepo = PreferenciasRepository();
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefsRepo,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        preferenciasRepository: prefsRepo,
+        busDeEventos: bus,
+      );
+      final notifVm = NotificacionesViewModel(
+        repositorio: notifRepo,
+        busDeEventos: bus,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      await notifVm.cargar();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: NotificacionesIngenieroScreen(viewModel: notifVm),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // El apartado de prueba de envío manual fue eliminado
+      expect(
+        find.text('Enviar notificación mediante la aplicación'),
+        findsNothing,
+      );
+      expect(find.text('Enviar notificación push'), findsNothing);
+
+      // Permanece el recordatorio diario y el historial de alertas de semáforo
+      expect(
+        find.text('Recordatorio diario de sincronización'),
+        findsOneWidget,
+      );
+      expect(find.text('Modificar horario'), findsOneWidget);
+      expect(find.textContaining('Historial de alertas de semáforo'),
+          findsOneWidget);
+
+      // Alternar el switch actualiza el estado y SharedPreferences
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+      expect(notifVm.recordatorio.activo, isFalse);
+      expect(prefsRepo.recordatorioLocal.activo, isFalse);
+      expect(notifFalsas.recordatorioCancelado, isTrue);
+
+      notifVm.dispose();
       await notifFalsas.dispose();
       await bus.dispose();
     },

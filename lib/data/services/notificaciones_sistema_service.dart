@@ -5,14 +5,13 @@ import 'package:flutter/services.dart';
 
 import '../../domain/models/aviso.dart';
 
-/// Interfaz del servicio de notificaciones
+/// Interfaz del servicio de notificaciones.
 ///
 /// Permite que los repositorios y ViewModels trabajen contra una abstracción
 /// testeable con un Fake (`NotificacionesFalsas`) sin invocar canales nativos
-/// durante los tests ni pedir permisos en el arranque de `main()`.
+/// ni Firebase durante los tests ni pedir permisos en el arranque de `main()`.
 abstract class ServicioDeNotificaciones {
-  /// Solicita permiso al usuario en contexto (por ejemplo, al activar alertas
-  /// o enviar una notificación, nunca al iniciar `main()`).
+  /// Solicita permiso al usuario en contexto (nunca al iniciar `main()`).
   ///
   /// Devuelve `true` solo si el usuario realmente lo concedió.
   Future<bool> pedirPermiso();
@@ -24,13 +23,15 @@ abstract class ServicioDeNotificaciones {
   Future<void> cancelar(int id);
 
   /// Programa un aviso que se repite todos los días a [hora]:[minuto]
-  /// (lo agenda el sistema operativo con `AlarmManager`, funciona con la app
-  /// cerrada).
+  /// (lo agenda el sistema operativo con `AlarmManager`, persiste en
+  /// `SharedPreferences` nativo y solo se muestra si existen informes
+  /// pendientes en [nombreBaseDatos]).
   Future<void> programarRecordatorioDiario({
     required int hora,
     required int minuto,
     required String titulo,
     required String mensaje,
+    String? nombreBaseDatos,
   });
 
   /// Cancela el recordatorio diario programado.
@@ -57,8 +58,6 @@ class NotificacionesSistemaService implements ServicioDeNotificaciones {
   Future<bool> pedirPermiso() async {
     if (kIsWeb) return true;
     try {
-      // El lado nativo espera la respuesta del diálogo del sistema y devuelve
-      // true/false según lo que el usuario eligió realmente.
       final concedido = await _canal.invokeMethod<bool>('pedirPermiso');
       return concedido ?? false;
     } catch (e) {
@@ -71,12 +70,11 @@ class NotificacionesSistemaService implements ServicioDeNotificaciones {
   Future<void> mostrar(Aviso aviso) async {
     if (kIsWeb) return;
     try {
-      // Siempre se consulta/pide el permiso ANTES de publicar: si se publica
-      // sin permiso, Android descarta el aviso en silencio.
       final permitido = await pedirPermiso();
       if (!permitido) {
         debugPrint(
-            '[Notificaciones] Sin permiso: aviso "${aviso.titulo}" omitido');
+          '[Notificaciones] Sin permiso: aviso "${aviso.titulo}" omitido',
+        );
         return;
       }
       await _canal.invokeMethod<bool>('mostrarNotificacion', {
@@ -105,6 +103,7 @@ class NotificacionesSistemaService implements ServicioDeNotificaciones {
     required int minuto,
     required String titulo,
     required String mensaje,
+    String? nombreBaseDatos,
   }) async {
     if (kIsWeb) return;
     try {
@@ -113,6 +112,7 @@ class NotificacionesSistemaService implements ServicioDeNotificaciones {
         'minuto': minuto,
         'titulo': titulo,
         'mensaje': mensaje,
+        if (nombreBaseDatos != null) 'nombreBaseDatos': nombreBaseDatos,
       });
     } catch (e) {
       debugPrint('[Notificaciones] programarRecordatorio falló: $e');

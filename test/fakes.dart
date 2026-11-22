@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:constructora_del_sur/data/services/base_datos_local_service.dart';
+import 'package:constructora_del_sur/data/services/firebase_notificaciones_service.dart';
 import 'package:constructora_del_sur/data/services/fuente_datos_remota.dart';
 import 'package:constructora_del_sur/data/services/generador_ids.dart';
 import 'package:constructora_del_sur/data/services/notificaciones_sistema_service.dart';
@@ -58,6 +59,9 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
   final Map<String, Map<String, dynamic>> reportesRemotos = {};
   final Map<String, Map<String, dynamic>> notificacionesRemotas = {};
   final Map<String, Map<String, dynamic>> plantillasRemotas = {};
+  final Map<String, Map<String, dynamic>> configuracionesRecordatorioRemotas =
+      {};
+  final Map<String, String?> fcmTokensRemotos = {};
   final StreamController<String> _cambiosRealtime =
       StreamController<String>.broadcast();
 
@@ -94,6 +98,15 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
     usuariosRemotos[usuario['id'] as String] = Map<String, dynamic>.from(
       usuario,
     );
+  }
+
+  @override
+  Future<void> actualizarFcmToken({
+    required String usuarioId,
+    required String? fcmToken,
+  }) async {
+    _verificarRed();
+    fcmTokensRemotos[usuarioId] = fcmToken;
   }
 
   @override
@@ -140,6 +153,15 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
     _verificarRed();
     plantillasRemotas[plantilla['id'] as String] =
         Map<String, dynamic>.from(plantilla);
+  }
+
+  @override
+  Future<void> upsertConfiguracionRecordatorio(
+    Map<String, dynamic> config,
+  ) async {
+    _verificarRed();
+    configuracionesRecordatorioRemotas[config['ingeniero_id'] as String] =
+        Map<String, dynamic>.from(config);
   }
 
   @override
@@ -248,6 +270,7 @@ class NotificacionesFalsas implements ServicioDeNotificaciones {
   final List<int> canceladas = [];
   final StreamController<String> _toques = StreamController<String>.broadcast();
   final List<(int, int)> recordatoriosProgramados = [];
+  String? ultimaBaseDatosRecordatorio;
   bool recordatorioCancelado = false;
   bool permisoConcedido = true;
 
@@ -270,8 +293,10 @@ class NotificacionesFalsas implements ServicioDeNotificaciones {
     required int minuto,
     required String titulo,
     required String mensaje,
+    String? nombreBaseDatos,
   }) async {
     recordatoriosProgramados.add((hora, minuto));
+    ultimaBaseDatosRecordatorio = nombreBaseDatos;
   }
 
   @override
@@ -286,6 +311,50 @@ class NotificacionesFalsas implements ServicioDeNotificaciones {
 
   Future<void> dispose() async {
     await _toques.close();
+  }
+}
+
+/// Implementación Fake de [ServicioPushFcm] para probar el registro, rotación
+/// y limpieza de tokens FCM sin tocar Firebase real.
+class FakeServicioPushFcm implements ServicioPushFcm {
+  FakeServicioPushFcm({
+    this.tokenActual = 'token_fcm_fake_1',
+    this.estaDisponible = true,
+  });
+
+  String? tokenActual;
+
+  @override
+  bool estaDisponible;
+
+  bool tokenEliminado = false;
+  final StreamController<String> _cambiosToken =
+      StreamController<String>.broadcast();
+
+  @override
+  Future<void> inicializarPush() async {}
+
+  @override
+  Future<String?> obtenerToken() async => tokenActual;
+
+  @override
+  Stream<String> get cambiosDeToken => _cambiosToken.stream;
+
+  @override
+  Future<void> eliminarToken() async {
+    tokenEliminado = true;
+    tokenActual = null;
+  }
+
+  void simularRotacionToken(String nuevoToken) {
+    tokenActual = nuevoToken;
+    if (!_cambiosToken.isClosed) {
+      _cambiosToken.add(nuevoToken);
+    }
+  }
+
+  Future<void> dispose() async {
+    await _cambiosToken.close();
   }
 }
 

@@ -28,13 +28,17 @@ class BaseDatosLocalService {
 
   static const nombreArchivoDb = 'constructora_del_sur_v4.db';
   static const nombreArchivoSupabase = 'constructora_del_sur_supabase.db';
-  static const versionEsquema = 4;
+  static const versionEsquema = 5;
 
   final DatabaseFactory? _fabricaBaseDatos;
   final Reloj _reloj;
   final bool _insertarSemillasDePrueba;
   final String _nombreArchivo;
   final bool _instanciaUnica;
+
+  /// Nombre del archivo SQLite activo en esta instancia (usado por el
+  /// `RecordatorioReceiver` nativo de Android para consultar informes `pending`).
+  String get nombreArchivoActivo => _nombreArchivo;
 
   Database? _db;
   bool _inicializado = false;
@@ -52,13 +56,8 @@ class BaseDatosLocalService {
   final List<Map<String, dynamic>> _notificacionesMemoria = [];
   final List<Map<String, dynamic>> _plantillasMemoria = [];
   final List<Map<String, dynamic>> _colaSyncMemoria = [];
+  final List<Map<String, dynamic>> _configRecordatoriosMemoria = [];
   String? _ultimaSyncUtcMemoria;
-  Map<String, dynamic> _configRecordatorioMemoria = {
-    'id': 1,
-    'activo': 1,
-    'hora': 18,
-    'minuto': 0,
-  };
 
   String _ahoraUtcIso() => _reloj.ahora().toUtc().toIso8601String();
 
@@ -129,6 +128,9 @@ class BaseDatosLocalService {
               if (oldVersion < 4) {
                 await _migrarV3AV4(db);
               }
+              if (oldVersion < 5) {
+                await _migrarV4AV5(db);
+              }
               await _crearIndicesSql(db);
             },
           ),
@@ -166,6 +168,7 @@ class BaseDatosLocalService {
         nombre TEXT NOT NULL,
         contrasenia TEXT NOT NULL,
         telefono TEXT NOT NULL DEFAULT '',
+        fcm_token TEXT,
         updated_at TEXT NOT NULL,
         sync_status TEXT NOT NULL DEFAULT 'synced',
         FOREIGN KEY (rol_id) REFERENCES roles(id)
@@ -289,6 +292,7 @@ class BaseDatosLocalService {
       CREATE TABLE notificaciones (
         id TEXT PRIMARY KEY,
         obra_id TEXT,
+        emisor_id TEXT,
         titulo TEXT NOT NULL,
         mensaje TEXT NOT NULL,
         destinatario TEXT NOT NULL,
@@ -298,16 +302,24 @@ class BaseDatosLocalService {
         sync_status TEXT NOT NULL DEFAULT 'synced',
         FOREIGN KEY (obra_id) REFERENCES obras(id)
           ON UPDATE CASCADE
+          ON DELETE SET NULL,
+        FOREIGN KEY (emisor_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
           ON DELETE SET NULL
       )
     ''');
 
     await db.execute('''
       CREATE TABLE configuracion_recordatorio (
-        id INTEGER PRIMARY KEY,
-        activo INTEGER NOT NULL,
-        hora INTEGER NOT NULL,
-        minuto INTEGER NOT NULL
+        ingeniero_id TEXT PRIMARY KEY,
+        activo INTEGER NOT NULL DEFAULT 1,
+        hora INTEGER NOT NULL DEFAULT 18,
+        minuto INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        FOREIGN KEY (ingeniero_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
       )
     ''');
 
@@ -400,6 +412,14 @@ class BaseDatosLocalService {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_notificaciones_obra_id '
       'ON notificaciones(obra_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_notificaciones_emisor_id '
+      'ON notificaciones(emisor_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_config_recordatorio_sync_status '
+      'ON configuracion_recordatorio(sync_status)',
     );
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_cola_sync_entidad '
@@ -539,16 +559,74 @@ class BaseDatosLocalService {
     ''');
   }
 
+  /// Migración incremental v4 -> v5: agrega `usuarios.fcm_token`,
+  /// `notificaciones.emisor_id` y migra `configuracion_recordatorio` a un
+  /// registro sincronizable por ingeniero (`ingeniero_id` PK).
+  Future<void> _migrarV4AV5(Database db) async {
+    final ahora = _ahoraUtcIso();
+    await db.execute('ALTER TABLE usuarios ADD COLUMN fcm_token TEXT');
+    await db.execute(
+      'ALTER TABLE notificaciones ADD COLUMN emisor_id TEXT '
+      'REFERENCES usuarios(id) ON UPDATE CASCADE ON DELETE SET NULL',
+    );
+
+    await db.execute('PRAGMA foreign_keys = OFF');
+    try {
+      await db.transaction((txn) async {
+        final previa = await txn.query('configuracion_recordatorio', limit: 1);
+        final activo =
+            previa.isNotEmpty ? (previa.first['activo'] as int? ?? 1) : 1;
+        final hora =
+            previa.isNotEmpty ? (previa.first['hora'] as int? ?? 18) : 18;
+        final minuto =
+            previa.isNotEmpty ? (previa.first['minuto'] as int? ?? 0) : 0;
+
+        await txn.execute('DROP TABLE IF EXISTS configuracion_recordatorio');
+        await txn.execute('''
+          CREATE TABLE configuracion_recordatorio (
+            ingeniero_id TEXT PRIMARY KEY,
+            activo INTEGER NOT NULL DEFAULT 1,
+            hora INTEGER NOT NULL DEFAULT 18,
+            minuto INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL,
+            sync_status TEXT NOT NULL DEFAULT 'synced',
+            FOREIGN KEY (ingeniero_id) REFERENCES usuarios(id)
+              ON UPDATE CASCADE
+              ON DELETE CASCADE
+          )
+        ''');
+
+        final ingenieros = await txn.query(
+          'usuarios',
+          columns: ['id'],
+          where: 'rol_id = ?',
+          whereArgs: ['rol_ingeniero'],
+        );
+        for (final ing in ingenieros) {
+          await txn.insert(
+            'configuracion_recordatorio',
+            {
+              'ingeniero_id': ing['id'],
+              'activo': activo,
+              'hora': hora,
+              'minuto': minuto,
+              'updated_at': ahora,
+              'sync_status': 'synced',
+            },
+            conflictAlgorithm: ConflictAlgorithm.ignore,
+          );
+        }
+      });
+    } finally {
+      await db.execute('PRAGMA foreign_keys = ON');
+    }
+  }
+
   Future<void> _insertarCatalogoRolesSql(Database db) async {
     for (final rol in _semillasRoles()) {
       await db.insert('roles', rol,
           conflictAlgorithm: ConflictAlgorithm.ignore);
     }
-    await db.insert(
-      'configuracion_recordatorio',
-      {'id': 1, 'activo': 1, 'hora': 18, 'minuto': 0},
-      conflictAlgorithm: ConflictAlgorithm.ignore,
-    );
     await db.insert(
       'estado_sincronizacion',
       {'id': 1, 'ultima_sync_utc': null},
@@ -584,6 +662,13 @@ class BaseDatosLocalService {
     for (final plantilla in _semillasPlantillas()) {
       await db.insert('catalogo_plantillas', plantilla);
     }
+    for (final recordatorio in _semillasConfiguracionesRecordatorio()) {
+      await db.insert(
+        'configuracion_recordatorio',
+        recordatorio,
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+    }
   }
 
   void _cargarSemillasEnMemoria() {
@@ -614,6 +699,9 @@ class BaseDatosLocalService {
     _plantillasMemoria
       ..clear()
       ..addAll(_semillasPlantillas());
+    _configRecordatoriosMemoria
+      ..clear()
+      ..addAll(_semillasConfiguracionesRecordatorio());
   }
 
   /// Obtiene todos los registros crudos de la tabla `roles`.
@@ -1610,6 +1698,8 @@ class BaseDatosLocalService {
     DateTime? fechaSyncUtc,
   }) async {
     await inicializar();
+    final columnaPk =
+        tabla == 'configuracion_recordatorio' ? 'ingeniero_id' : 'id';
     final valores = <String, dynamic>{'sync_status': 'synced'};
     if (tabla == 'reportes_diarios' && fechaSyncUtc != null) {
       valores['fecha_sincronizacion'] = fechaSyncUtc.toUtc().toIso8601String();
@@ -1617,13 +1707,18 @@ class BaseDatosLocalService {
 
     if (_usarMemoriaFallback) {
       final lista = _listaMemoriaPorTabla(tabla);
-      final idx = lista.indexWhere((e) => e['id'] == id);
+      final idx = lista.indexWhere((e) => e[columnaPk] == id);
       if (idx != -1) {
         lista[idx] = {...lista[idx], ...valores};
       }
       return;
     }
-    await _db!.update(tabla, valores, where: 'id = ?', whereArgs: [id]);
+    await _db!.update(
+      tabla,
+      valores,
+      where: '$columnaPk = ?',
+      whereArgs: [id],
+    );
   }
 
   /// Verifica si un registro local está actualmente en estado `pending`.
@@ -1633,17 +1728,19 @@ class BaseDatosLocalService {
     required String id,
   }) async {
     await inicializar();
+    final columnaPk =
+        tabla == 'configuracion_recordatorio' ? 'ingeniero_id' : 'id';
     if (_usarMemoriaFallback) {
       final lista = _listaMemoriaPorTabla(tabla);
       for (final fila in lista) {
-        if (fila['id'] == id) return fila['sync_status'] == 'pending';
+        if (fila[columnaPk] == id) return fila['sync_status'] == 'pending';
       }
       return false;
     }
     final filas = await _db!.query(
       tabla,
       columns: ['sync_status'],
-      where: 'id = ?',
+      where: '$columnaPk = ?',
       whereArgs: [id],
       limit: 1,
     );
@@ -1836,45 +1933,168 @@ class BaseDatosLocalService {
     }
   }
 
-  /// Obtiene la configuración del recordatorio diario de sincronización.
-  Future<Map<String, dynamic>> obtenerConfiguracionRecordatorio() async {
+  /// Actualiza el `fcm_token` local de un usuario sin marcar el perfil como pending.
+  Future<void> actualizarFcmTokenUsuarioLocal({
+    required String usuarioId,
+    required String? fcmToken,
+  }) async {
     await inicializar();
     if (_usarMemoriaFallback) {
-      return Map<String, dynamic>.from(_configRecordatorioMemoria);
+      final idx = _usuariosMemoria.indexWhere((u) => u['id'] == usuarioId);
+      if (idx != -1) {
+        _usuariosMemoria[idx] = {
+          ..._usuariosMemoria[idx],
+          'fcm_token': fcmToken,
+        };
+      }
+      return;
     }
-    final filas = await _db!.query('configuracion_recordatorio', limit: 1);
+    await _db!.update(
+      'usuarios',
+      {'fcm_token': fcmToken},
+      where: 'id = ?',
+      whereArgs: [usuarioId],
+    );
+  }
+
+  /// Obtiene la configuración del recordatorio diario de un ingeniero concreto
+  /// (o el valor por defecto `18:00` activo si aún no configuró ninguno).
+  Future<Map<String, dynamic>> obtenerConfiguracionRecordatorio({
+    String? ingenieroId,
+  }) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      if (ingenieroId != null) {
+        for (final fila in _configRecordatoriosMemoria) {
+          if (fila['ingeniero_id'] == ingenieroId) {
+            return Map<String, dynamic>.from(fila);
+          }
+        }
+      } else if (_configRecordatoriosMemoria.isNotEmpty) {
+        return Map<String, dynamic>.from(_configRecordatoriosMemoria.first);
+      }
+      return {
+        'ingeniero_id': ingenieroId,
+        'activo': 1,
+        'hora': 18,
+        'minuto': 0,
+        'updated_at': _ahoraUtcIso(),
+        'sync_status': 'synced',
+      };
+    }
+    final filas = ingenieroId != null
+        ? await _db!.query(
+            'configuracion_recordatorio',
+            where: 'ingeniero_id = ?',
+            whereArgs: [ingenieroId],
+            limit: 1,
+          )
+        : await _db!.query('configuracion_recordatorio', limit: 1);
     if (filas.isEmpty) {
-      return {'id': 1, 'activo': 1, 'hora': 18, 'minuto': 0};
+      return {
+        'ingeniero_id': ingenieroId,
+        'activo': 1,
+        'hora': 18,
+        'minuto': 0,
+        'updated_at': _ahoraUtcIso(),
+        'sync_status': 'synced',
+      };
     }
     return filas.first;
   }
 
-  /// Actualiza el horario del recordatorio diario de sincronización.
-  Future<void> guardarConfiguracionRecordatorio({
-    required bool activo,
-    required int hora,
-    required int minuto,
-  }) async {
+  /// Obtiene todas las configuraciones de recordatorio por ingeniero en caché local.
+  Future<List<Map<String, dynamic>>>
+      obtenerTodasLasConfiguracionesRecordatorio() async {
     await inicializar();
-    final valores = {
-      'id': 1,
-      'activo': activo ? 1 : 0,
-      'hora': hora,
-      'minuto': minuto,
-    };
     if (_usarMemoriaFallback) {
-      _configRecordatorioMemoria = valores;
+      return _configRecordatoriosMemoria
+          .map(Map<String, dynamic>.from)
+          .toList();
+    }
+    return _db!.query('configuracion_recordatorio');
+  }
+
+  /// Inserta o actualiza una fila cruda en `configuracion_recordatorio`.
+  Future<void> guardarConfiguracionRecordatorioCruda(
+    Map<String, dynamic> datos,
+  ) async {
+    await inicializar();
+    final ingenieroId = datos['ingeniero_id'] as String?;
+    if (ingenieroId == null || ingenieroId.isEmpty) return;
+
+    final valores = <String, dynamic>{
+      'ingeniero_id': ingenieroId,
+      'activo': (datos['activo'] is bool)
+          ? ((datos['activo'] as bool) ? 1 : 0)
+          : (datos['activo'] as int? ?? 1),
+      'hora': (datos['hora'] as int?) ?? 18,
+      'minuto': (datos['minuto'] as int?) ?? 0,
+      'updated_at': (datos['updated_at'] as String?) ?? _ahoraUtcIso(),
+      'sync_status': (datos['sync_status'] as String?) ?? 'pending',
+    };
+
+    if (_usarMemoriaFallback) {
+      final idx = _configRecordatoriosMemoria
+          .indexWhere((c) => c['ingeniero_id'] == ingenieroId);
+      if (idx == -1) {
+        _configRecordatoriosMemoria.add(valores);
+      } else {
+        _configRecordatoriosMemoria[idx] = valores;
+      }
       return;
     }
+
+    // Verifica que el ingeniero exista localmente para respetar la FK.
+    final existeUsuario = await _db!.query(
+      'usuarios',
+      columns: ['id'],
+      where: 'id = ?',
+      whereArgs: [ingenieroId],
+      limit: 1,
+    );
+    if (existeUsuario.isEmpty) return;
+
     final actualizados = await _db!.update(
       'configuracion_recordatorio',
       valores,
-      where: 'id = ?',
-      whereArgs: [1],
+      where: 'ingeniero_id = ?',
+      whereArgs: [ingenieroId],
     );
     if (actualizados == 0) {
       await _db!.insert('configuracion_recordatorio', valores);
     }
+  }
+
+  /// Actualiza el horario del recordatorio diario del ingeniero indicado.
+  Future<void> guardarConfiguracionRecordatorio({
+    String? ingenieroId,
+    required bool activo,
+    required int hora,
+    required int minuto,
+    String syncStatus = 'pending',
+  }) async {
+    await inicializar();
+    var idObjetivo = ingenieroId;
+    if (idObjetivo == null || idObjetivo.isEmpty) {
+      final usuarios = await obtenerUsuariosCrudos();
+      for (final u in usuarios) {
+        if (u['rol_id'] == 'rol_ingeniero') {
+          idObjetivo = u['id'] as String;
+          break;
+        }
+      }
+    }
+    if (idObjetivo == null || idObjetivo.isEmpty) return;
+
+    await guardarConfiguracionRecordatorioCruda({
+      'ingeniero_id': idObjetivo,
+      'activo': activo ? 1 : 0,
+      'hora': hora,
+      'minuto': minuto,
+      'updated_at': _ahoraUtcIso(),
+      'sync_status': syncStatus,
+    });
   }
 
   /// Cierra la conexión SQLite cuando ya no se utiliza.
@@ -1892,6 +2112,7 @@ class BaseDatosLocalService {
         'reportes_diarios' => _reportesMemoria,
         'notificaciones' => _notificacionesMemoria,
         'catalogo_plantillas' => _plantillasMemoria,
+        'configuracion_recordatorio' => _configRecordatoriosMemoria,
         _ => throw ArgumentError('Tabla no soportada para sync: $tabla'),
       };
 
@@ -2273,6 +2494,7 @@ class BaseDatosLocalService {
         {
           'id': 'notif_1',
           'obra_id': '1',
+          'emisor_id': 'u_capataz',
           'titulo': 'Alerta Roja: Torre Residencial Las Heras',
           'mensaje':
               'La obra pasó a estado "Con problemas" (Rojo). Motivo: Faltó hormigón el martes.',
@@ -2285,6 +2507,7 @@ class BaseDatosLocalService {
         {
           'id': 'notif_2',
           'obra_id': '3',
+          'emisor_id': 'u_capataz',
           'titulo': 'Alerta Amarilla: Nave Industrial Parque Sur',
           'mensaje':
               'La obra pasó a estado "Demorada" (Amarillo). Motivo: Lluvia, se perdieron dos días.',
@@ -2295,6 +2518,20 @@ class BaseDatosLocalService {
           'sync_status': 'synced',
         },
       ];
+
+  List<Map<String, dynamic>> _semillasConfiguracionesRecordatorio() {
+    final ts = DateTime.utc(2026, 9, 18).toIso8601String();
+    return [
+      {
+        'ingeniero_id': 'u_ingeniero',
+        'activo': 1,
+        'hora': 18,
+        'minuto': 0,
+        'updated_at': ts,
+        'sync_status': 'synced',
+      },
+    ];
+  }
 
   /// Catálogo inicial de tareas y materiales frecuentes para el ingeniero
   /// en modo demo/test (sugerencias opcionales, nunca precargadas en la obra).

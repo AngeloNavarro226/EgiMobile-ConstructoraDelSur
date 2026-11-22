@@ -1,12 +1,14 @@
 import 'package:flutter/foundation.dart';
 
+import '../domain/models/notificacion_app.dart';
 import '../domain/models/obra.dart';
 import '../domain/models/usuario.dart';
 
-/// Política de avisos del sistema
+/// Política de avisos del sistema.
 ///
-/// Decide cuándo corresponde disparar un aviso en la barra de estado sin
-/// acoplar esa regla al widget ni al plugin nativo.
+/// Decide cuándo corresponde disparar una alerta de semáforo, a qué roles y
+/// usuarios debe notificarse según quién hizo el cambio, y qué horario efectivo
+/// de recordatorio diario aplica al equipo de un capataz.
 class PoliticaDeAvisos {
   const PoliticaDeAvisos();
 
@@ -14,10 +16,105 @@ class PoliticaDeAvisos {
   /// (`demorada`) o rojo (`problemas`).
   bool debeAvisar(EstadoObra estado) =>
       estado == EstadoObra.demorada || estado == EstadoObra.problemas;
+
+  /// Resuelve los destinatarios exactos de la notificación push de cambio de
+  /// semáforo según quién realizó la acción:
+  /// - Si el cambio lo hace el **Capataz**: informa al **Ingeniero a cargo**
+  ///   (`obra.ingenieroId`) y al **Dueño**.
+  /// - Si el cambio lo hace el **Ingeniero**: informa al **Capataz a cargo**
+  ///   (`obra.responsableId`) y al **Dueño**.
+  ///
+  /// Nunca incluye al propio [emisor] como destinatario.
+  List<Usuario> resolverDestinatariosAlertaSemaforo({
+    required Obra obra,
+    required Usuario? emisor,
+    required List<Usuario> usuarios,
+  }) {
+    final porId = <String, Usuario>{for (final u in usuarios) u.id: u};
+    final resultado = <String, Usuario>{};
+
+    void agregarSiExiste(String? id) {
+      if (id == null || id.isEmpty) return;
+      final usuario = porId[id];
+      if (usuario != null) {
+        resultado[usuario.id] = usuario;
+      }
+    }
+
+    // El Dueño siempre recibe alertas de semáforo Amarillo o Rojo.
+    for (final usuario in usuarios) {
+      if (usuario.rol.tipo == RolUsuario.duenio) {
+        resultado[usuario.id] = usuario;
+      }
+    }
+
+    final rolEmisor = emisor?.rol.tipo;
+    if (rolEmisor == RolUsuario.capataz) {
+      if (obra.ingenieroId != null && porId.containsKey(obra.ingenieroId)) {
+        agregarSiExiste(obra.ingenieroId);
+      } else {
+        for (final usuario in usuarios) {
+          if (usuario.rol.tipo == RolUsuario.ingeniero) {
+            resultado[usuario.id] = usuario;
+          }
+        }
+      }
+    } else if (rolEmisor == RolUsuario.ingeniero) {
+      agregarSiExiste(obra.responsableId);
+    } else {
+      if (obra.ingenieroId != null && porId.containsKey(obra.ingenieroId)) {
+        agregarSiExiste(obra.ingenieroId);
+      } else {
+        for (final usuario in usuarios) {
+          if (usuario.rol.tipo == RolUsuario.ingeniero) {
+            resultado[usuario.id] = usuario;
+          }
+        }
+      }
+    }
+
+    if (emisor != null) {
+      resultado.remove(emisor.id);
+    }
+
+    return resultado.values.toList();
+  }
+
+  /// Determina la configuración efectiva del recordatorio diario para un
+  /// capataz a partir de los ingenieros a cargo de sus obras activas
+  /// (`obra.ingenieroId`).
+  ///
+  /// Si un capataz tiene obras de 2 o más ingenieros con horarios distintos,
+  /// toma únicamente el **horario más temprano** entre las configuraciones
+  /// activas. Devuelve `null` si ninguna configuración aplicable está activa.
+  ProgramacionRecordatorio? resolverRecordatorioMasTemprano({
+    required List<Obra> obrasDelCapataz,
+    required Map<String, ProgramacionRecordatorio> configuracionesPorIngeniero,
+  }) {
+    final ingenierosIds = <String>{
+      for (final obra in obrasDelCapataz)
+        if (!obra.finalizada &&
+            obra.deletedAt == null &&
+            obra.ingenieroId != null &&
+            obra.ingenieroId!.isNotEmpty)
+          obra.ingenieroId!,
+    };
+
+    ProgramacionRecordatorio? masTemprano;
+    for (final ingenieroId in ingenierosIds) {
+      final config = configuracionesPorIngeniero[ingenieroId];
+      if (config == null || !config.activo) continue;
+      if (masTemprano == null ||
+          config.minutosDesdeMedianoche < masTemprano.minutosDesdeMedianoche) {
+        masTemprano = config;
+      }
+    }
+    return masTemprano;
+  }
 }
 
 /// Define lo que la aplicación **debe** hacer según las reglas de negocio,
-/// de las tiendas de aplicaciones y de cada perfil o entorno
+/// de las tiendas de aplicaciones y de cada perfil o entorno.
 class Politicas {
   const Politicas();
 
@@ -59,7 +156,7 @@ class Politicas {
   bool puedeGestionarAvanceObra(RolUsuario rol) =>
       rol == RolUsuario.ingeniero || rol == RolUsuario.capataz;
 
-  /// Indica si el rol puede programar y enviar notificaciones desde el panel.
+  /// Indica si el rol puede programar el recordatorio diario de su equipo.
   bool puedeAdministrarNotificaciones(RolUsuario rol) =>
       rol == RolUsuario.ingeniero;
 

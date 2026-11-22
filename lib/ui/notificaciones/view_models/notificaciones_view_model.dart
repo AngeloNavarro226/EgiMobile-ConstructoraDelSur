@@ -6,8 +6,9 @@ import '../../../domain/models/evento_de_app.dart';
 import '../../../domain/models/notificacion_app.dart';
 import '../../core/view_model_base.dart';
 
-/// ViewModel del apartado exclusivo del Ingeniero para enviar notificaciones
-/// y programar el recordatorio automático diario de sincronización.
+/// ViewModel del apartado exclusivo del Ingeniero para configurar el
+/// recordatorio automático diario de sincronización de su equipo y consultar
+/// el historial de alertas proactivas de cambio de semáforo.
 class NotificacionesViewModel extends ViewModelBase {
   NotificacionesViewModel({
     required NotificacionesRepository repositorio,
@@ -32,27 +33,30 @@ class NotificacionesViewModel extends ViewModelBase {
   bool _enviando = false;
   String? _mensajeError;
 
+  /// Flujo de destinos cuando el usuario toca una notificación push FCM.
+  Stream<String> get toques => _repositorio.toques;
+
   /// Estado actual de la carga del panel de notificaciones.
   EstadoOperacion get estado => _estado;
 
-  /// Historial de notificaciones y alertas proactivas de semáforo.
+  /// Historial de alertas proactivas de cambio de semáforo.
   List<NotificacionApp> get notificaciones =>
       List.unmodifiable(_notificaciones);
 
-  /// Configuración del recordatorio diario de sincronización.
+  /// Configuración del recordatorio diario de sincronización del ingeniero.
   ProgramacionRecordatorio get recordatorio => _recordatorio;
 
   /// Indica si se están cargando los datos del panel.
   bool get cargando => _cargando;
 
-  /// Indica si se está enviando una notificación o actualizando el recordatorio.
+  /// Indica si se está actualizando el recordatorio.
   bool get enviando => _enviando;
 
   /// Último mensaje de error, si existiera.
   String? get mensajeError => _mensajeError;
 
-  /// Carga el historial de notificaciones y el horario del recordatorio,
-  /// notificando explícitamente en `cargando`, `exito` y `error`.
+  /// Carga el historial de alertas y el horario del recordatorio propio del
+  /// ingeniero autenticado, notificando en `cargando`, `exito` y `error`.
   Future<void> cargar() async {
     _estado = EstadoOperacion.cargando;
     _cargando = true;
@@ -73,7 +77,8 @@ class NotificacionesViewModel extends ViewModelBase {
     }
   }
 
-  /// Actualiza el horario o estado activo del recordatorio diario.
+  /// Actualiza el horario o estado activo del recordatorio diario del equipo
+  /// del ingeniero actual (persiste en SQLite + SharedPreferences + Supabase).
   Future<void> actualizarRecordatorioSincronizacion({
     required bool activo,
     required int hora,
@@ -100,44 +105,17 @@ class NotificacionesViewModel extends ViewModelBase {
     }
   }
 
-  /// Envía una notificación manual desde el panel del ingeniero y refresca.
-  Future<void> enviarNotificacion({
-    required String titulo,
-    required String mensaje,
-    required String destinatario,
-  }) async {
-    if (titulo.trim().isEmpty || mensaje.trim().isEmpty) return;
-
-    _enviando = true;
-    _mensajeError = null;
-    notificarSiActivo();
-
-    try {
-      await _repositorio.enviarNotificacionManual(
-        titulo: titulo,
-        mensaje: mensaje,
-        destinatario: destinatario,
-      );
-      _notificaciones = await _repositorio.obtenerNotificaciones();
-      _enviando = false;
-      _estado = EstadoOperacion.exito;
-      notificarSiActivo();
-    } catch (e) {
-      _enviando = false;
-      _estado = EstadoOperacion.error;
-      _mensajeError = 'No se pudo enviar la notificación: $e';
-      notificarSiActivo();
-    }
-  }
-
   void _procesarEventoGlobal(EventoDeApp evento) {
     switch (evento) {
-      case AlertaSemaforoEmitida() || SesionIniciada():
+      case AlertaSemaforoEmitida() ||
+            SesionIniciada() ||
+            SincronizacionCompletada():
         unawaited(cargar());
       case SesionCerrada():
         _notificaciones = [];
         _mensajeError = null;
         _estado = EstadoOperacion.inicial;
+        unawaited(_repositorio.cancelarRecordatorioLocal());
         notificarSiActivo();
       default:
         break;
