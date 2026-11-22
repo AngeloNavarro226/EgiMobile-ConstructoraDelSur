@@ -16,7 +16,7 @@ Aplicación móvil Flutter para gestión de obras civiles e informes diarios de 
 
 ---
 
-## 2. Arquitectura Actual (v2.3.0 — 55 archivos en `lib/`, 4 en `test/`)
+## 2. Arquitectura Actual (v2.3.0 — 58 archivos en `lib/`, 4 en `test/`)
 
 Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de dependencias manual en `lib/main.dart`:
 
@@ -33,7 +33,7 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
    - `Capacidades` (`lib/plataforma/capacidades.dart`) y `Politicas` / `PoliticaDeAvisos` (`lib/plataforma/politicas.dart`).
 3. **Capa de Datos (`lib/data/repositories/` y `lib/data/services/`):**
    - Repositorios (fuente de verdad + caché en memoria + `limpiarCache()`): `AutenticacionRepository`, `ObrasRepository`, `NotificacionesRepository` (destinatarios dinámicos por rol), `PreferenciasRepository` (persiste `usuario_sesion_id` offline).
-   - Servicios: `BaseDatosLocalService` (SQLite `constructora_del_sur_v4.db`, `version: 2` con `onUpgrade`, 3FN + `PRAGMA foreign_keys = ON`), `FuenteDatosRemota` / `FuenteDatosRemotaOffline` (seam para Supabase), `MotorSincronizacion` (Push → Pull con lock, subida de fotos previa al `upsert`, reintentos en `cola_sincronizacion` y *local-pending wins*), `GeneradorIds` / `GeneradorUuidV4`, `PreferenciasService`, `MultimediaService` (guardado en archivo local en nativo sin Base64 en SQLite), `SincronizacionService` (`connectivity_plus` + `Workmanager`), `NotificacionesSistemaService`, `VozATextoService`, `MapaService`, `DescargaArchivoService`, `BusDeEventos`, `Reloj`, `plataforma_io_real.dart` / `plataforma_io_stub.dart`.
+   - Servicios: `BaseDatosLocalService` (SQLite `constructora_del_sur_v4.db`, `version: 2` con `onUpgrade`, 3FN + `PRAGMA foreign_keys = ON`), `ConfiguracionSupabase` (`--dart-define` / `.env.json` ignorado en Git), `FuenteDatosRemota` / `SupabaseRemoteService` / `FuenteDatosRemotaOffline`, `ServicioAutenticacionRemota` / `SupabaseAuthService` / `ServicioAutenticacionRemotaOffline`, `MotorSincronizacion` (Push → Pull con lock, subida de fotos previa al `upsert`, reintentos en `cola_sincronizacion` y *local-pending wins*), `GeneradorIds` / `GeneradorUuidV4`, `PreferenciasService`, `MultimediaService` (guardado en archivo local en nativo sin Base64 en SQLite), `SincronizacionService` (`connectivity_plus` + `Workmanager` conectado a `SupabaseRemoteService`), `NotificacionesSistemaService`, `VozATextoService`, `MapaService`, `DescargaArchivoService`, `BusDeEventos`, `Reloj`, `plataforma_io_real.dart` / `plataforma_io_stub.dart`.
 
 ---
 
@@ -56,8 +56,9 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 
 ### Esquema Remoto en Supabase (`EgiMobile`, `cgczsdbidvqykigxbgxg`, Postgres 17)
 
-- **9 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` y helpers RLS en esquema `private` (`private.usuario_actual_id`, `private.rol_codigo_actual`, `private.puede_ver_obra`, `private.puede_gestionar_obra`): `roles` (3 roles sembrados), `usuarios` (`auth_user_id` FK → `auth.users`, `telefono`, `fcm_token`, sin `contrasenia`), `obras`, `tareas_obra`, `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`, sin Base64), `notificaciones`.
+- **9 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created`, y helpers RLS en esquema `private` (`private.usuario_actual_id`, `private.rol_codigo_actual`, `private.puede_ver_obra`, `private.puede_gestionar_obra`): `roles` (3 roles sembrados), `usuarios` (`auth_user_id` FK → `auth.users`, 3 usuarios iniciales sembrados —1 por rol—, `telefono`, `fcm_token`, sin `contrasenia`), `obras`, `tareas_obra`, `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`, sin Base64), `notificaciones`.
 - **Storage:** bucket privado `fotos-obras` (`file_size_limit = 204800`, JPEG/PNG/WebP) con políticas RLS por rol en `storage.objects`.
+- **Realtime:** publicación `supabase_realtime` habilitada para `obras`, `tareas_obra`, `reportes_diarios`, `reporte_fotos` y `notificaciones` (consumida vía `FuenteDatosRemota.escucharCambiosRemotos()` con debounce de 1200 ms + respaldo periódico cada 45 s solo en primer plano + `RefreshIndicator`).
 - *(Las tablas `configuracion_recordatorio`, `estado_sincronizacion` y `cola_sincronizacion` son locales por dispositivo y no se replican en PostgreSQL.)*
 
 > **Nota técnica importante en `android/`:** En `proyectoegi/android/app/src/main/kotlin/` conviven `com/example/proyectoegi/MainActivity.kt` y `com/example/constructora_del_sur/{MainActivity.kt, Notificador.kt, RecordatorioReceiver.kt}`. Al configurar Firebase (`google-services.json`), verificar primero el `applicationId` exacto en `android/app/build.gradle.kt` y unificar si hay duplicación de `MainActivity.kt`.
@@ -67,10 +68,10 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 ## 4. Estado de Calidad y Red de Seguridad Actual
 
 - `analysis_options.yaml` exige 5 reglas extra sobre `flutter_lints`: `always_declare_return_types`, `directives_ordering`, `prefer_const_constructors`, `prefer_single_quotes`, `unawaited_futures` (`page_width: 80`).
-- **Tests existentes (4 archivos, 12 pruebas):**
-  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
+- **Tests existentes (4 archivos, 15 pruebas):**
+  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota`, `FakeServicioAutenticacionRemota`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
   - `test/plataforma_test.dart`: capacidades/políticas Android, iOS y Linux.
-  - `test/caracterizacion_y_dominio_test.dart`: avance de `Obra`, autenticación + sesión offline, roles 1:N + columna `telefono` + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins* + idempotencia, filtro `Finalizadas`, auditoría de `notifyListeners()` y `dispose()` seguro en los 5 ViewModels, `NotificacionesRepository` con destinatarios dinámicos, horarios, geocodificación y `Workmanager`.
+  - `test/caracterizacion_y_dominio_test.dart`: avance de `Obra`, autenticación + sesión offline + Supabase Auth fake, mapeo SQLite↔Postgres de `SupabaseRemoteService`, roles 1:N + columna `telefono` + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins* + idempotencia, filtro `Finalizadas`, auditoría de `notifyListeners()` y `dispose()` seguro en los 5 ViewModels, `NotificacionesRepository` con destinatarios dinámicos, horarios, geocodificación y `Workmanager`.
   - `test/widget_test.dart`: arranque en `LoginScreen`, validación de errores, ingreso como capataz y verificación de `telefono` visible en `PerfilScreen`.
 
 ---
@@ -80,8 +81,8 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 | Fase | Objetivo | Estado | Skill asignada |
 | :--- | :--- | :--- | :--- |
 | **Fase 0** | **Preparación Offline-First y Escalabilidad Local:** Esquema v2 (`onUpgrade`), `telefono`, `roles 1:N`, UUID v4, `FuenteDatosRemota`, `MotorSincronizacion` Push → Pull, fotos en archivo local + visores URL, operaciones granulares, `ViewModelBase` + auditoría `notifyListeners()` | **Completado** | `refactoring_safe` |
-| **Fase 1** | **Supabase como BD principal + Offline-First:** Tablas PostgreSQL + RLS + bucket `fotos-obras` creados en `EgiMobile` (`cgczsdbidvqykigxbgxg`); falta implementar `SupabaseRemoteService implements FuenteDatosRemota` (`supabase_flutter`) y migrar `AutenticacionRepository` a Supabase Auth | En progreso (BD + RLS + Storage listos) | `supabase-offline-first` |
-| **Fase 2** | **Sincronización real en producción:** Conectar `Workmanager` `callbackDispatcher` con `SupabaseRemoteService` + pruebas end-to-end contra Supabase | En progreso (motor local listo) | `sync-engine-implementation` |
+| **Fase 1** | **Supabase como BD principal + Offline-First:** Tablas PostgreSQL + RLS + bucket `fotos-obras` + 3 usuarios Auth (1 por rol) creados en `EgiMobile` (`cgczsdbidvqykigxbgxg`), `SupabaseRemoteService`, `SupabaseAuthService`, `ConfiguracionSupabase` (`--dart-define-from-file=.env.json`) y `AutenticacionRepository` migrado con sesión offline | **Completado** | `supabase-offline-first` |
+| **Fase 2** | **Sincronización real en producción:** `Workmanager` `callbackDispatcher` + `connectivity_plus` + `AppLifecycleListener.onResume` + `SesionIniciada` conectados a `SupabaseRemoteService` y `MotorSincronizacion` | **Completado** *(pendiente prueba manual en dispositivo real)* | `sync-engine-implementation` |
 | **Fase 3** | **Notificaciones Push reales (Firebase FCM):** Integrar `firebase_core` + `firebase_messaging`, registrar tokens FCM por usuario en Supabase y enviar push reales manteniendo `ServicioDeNotificaciones` | Pendiente | `firebase-push-notifications` |
 | **Fase 4** | **Limpieza de UI de versión de prueba:** Quitar `_TarjetaUsuariosPrueba` y `_autocompletarCredencialPrueba` de `login_screen.dart`, quitar botones de simulación y semillas demo en producción, y actualizar `test/widget_test.dart` | Pendiente | `ui-production-cleanup` |
 

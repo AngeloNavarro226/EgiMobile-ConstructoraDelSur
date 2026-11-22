@@ -73,11 +73,15 @@ class ObrasViewModel extends ViewModelBase {
 
   StreamSubscription<bool>? _suscripcionConexion;
   StreamSubscription<EventoDeApp>? _suscripcionEventos;
+  StreamSubscription<String>? _suscripcionRealtime;
   Timer? _temporizadorAlertaSync;
+  Timer? _debounceRealtime;
+  Timer? _temporizadorRespaldoSync;
 
   EstadoCargaObras _estado = EstadoCargaObras.cargando;
   bool _guardando = false;
   bool _sincronizando = false;
+  bool _syncPendienteAlTerminar = false;
   bool _cargandoReportesObra = false;
   String? _mensajeError;
   String? _mensajeErrorSincronizacion;
@@ -326,11 +330,14 @@ class ObrasViewModel extends ViewModelBase {
 
     try {
       final resultado = await _obrasRepository.sincronizarTodo(
-        permitirSimulacionLocal: true,
+        permitirSimulacionLocal:
+            !_autenticacionRepository.usaAutenticacionRemota,
       );
       _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
       _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
       _reportesPorObraCache.clear();
+      _responsablesDisponibles =
+          await _autenticacionRepository.obtenerResponsablesDisponibles();
       if (resultado.tuvoErrores) {
         _mensajeErrorSincronizacion = resultado.mensajeError;
       }
@@ -346,6 +353,101 @@ class ObrasViewModel extends ViewModelBase {
       _mostrandoAlertaSincronizacion = false;
       notificarSiActivo();
     });
+  }
+
+  /// Ejecuta sincronización bidireccional silenciosa (Push -> Pull) con
+  /// re-encolado automático si llega otro cambio mientras hay una sync activa.
+  Future<void> iniciarSincronizacionSilenciosa() async {
+    if (!_autenticacionRepository.usaAutenticacionRemota) {
+      return;
+    }
+    if (_sincronizando) {
+      _syncPendienteAlTerminar = true;
+      return;
+    }
+
+    _sincronizando = true;
+    _mensajeErrorSincronizacion = null;
+    notificarSiActivo();
+
+    try {
+      final resultado = await _obrasRepository.sincronizarTodo(
+        permitirSimulacionLocal: false,
+      );
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
+      _reportesPorObraCache.clear();
+      _responsablesDisponibles =
+          await _autenticacionRepository.obtenerResponsablesDisponibles();
+      if (resultado.tuvoErrores) {
+        _mensajeErrorSincronizacion = resultado.mensajeError;
+      } else if (resultado.cambiosDescargados > 0) {
+        _busDeEventos?.emitir(const ObrasActualizadas());
+      }
+      _sincronizando = false;
+      notificarSiActivo();
+    } catch (e) {
+      _sincronizando = false;
+      _mensajeErrorSincronizacion = 'Error durante la sincronización: $e';
+      notificarSiActivo();
+    }
+
+    if (_syncPendienteAlTerminar && !estaDescartado) {
+      _syncPendienteAlTerminar = false;
+      await iniciarSincronizacionSilenciosa();
+    }
+  }
+
+  /// Refresco manual disparado por gestos de Pull-to-Refresh en la lista.
+  Future<void> refrescarManual() async {
+    if (_autenticacionRepository.usaAutenticacionRemota) {
+      await iniciarSincronizacionSilenciosa();
+    } else {
+      await cargar(forzarRecarga: true);
+    }
+  }
+
+  /// Inicia la escucha Realtime de Supabase (`postgres_changes`) y un respaldo
+  /// periódico suave cada 45 segundos mientras la app está en primer plano.
+  void reanudarSincronizacionContinua() {
+    if (estaDescartado || !_autenticacionRepository.usaAutenticacionRemota) {
+      return;
+    }
+    _suscripcionRealtime ??= _obrasRepository.escucharCambiosRemotos().listen(
+      (tabla) {
+        _debounceRealtime?.cancel();
+        _debounceRealtime = Timer(const Duration(milliseconds: 1200), () {
+          if (estaDescartado) return;
+          if (tabla == 'notificaciones') {
+            _busDeEventos?.emitir(const AlertaSemaforoEmitida(obraId: ''));
+          }
+          unawaited(iniciarSincronizacionSilenciosa());
+        });
+      },
+    );
+
+    _temporizadorRespaldoSync ??= Timer.periodic(
+      const Duration(seconds: 45),
+      (_) {
+        if (!estaDescartado) {
+          unawaited(iniciarSincronizacionSilenciosa());
+        }
+      },
+    );
+  }
+
+  /// Pausa la escucha Realtime y el temporizador periódico al pasar a segundo
+  /// plano o cerrar sesión para cuidar batería y conexiones.
+  void pausarSincronizacionContinua() {
+    _debounceRealtime?.cancel();
+    _debounceRealtime = null;
+    _temporizadorRespaldoSync?.cancel();
+    _temporizadorRespaldoSync = null;
+    final sub = _suscripcionRealtime;
+    _suscripcionRealtime = null;
+    if (sub != null) {
+      unawaited(sub.cancel());
+    }
   }
 
   /// Cambia el estado del semáforo de una obra y dispara una alerta proactiva
@@ -380,6 +482,7 @@ class ObrasViewModel extends ViewModelBase {
       _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
       _guardando = false;
       notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
     } catch (e) {
       _guardando = false;
       _mensajeError = 'No se pudo actualizar el semáforo: $e';
@@ -399,6 +502,7 @@ class ObrasViewModel extends ViewModelBase {
       _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
       _guardando = false;
       notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
     } catch (e) {
       _guardando = false;
       _mensajeError = 'No se pudo agregar la tarea: $e';
@@ -417,6 +521,7 @@ class ObrasViewModel extends ViewModelBase {
       _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
       _guardando = false;
       notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
     } catch (e) {
       _guardando = false;
       _mensajeError = 'No se pudo actualizar el estado de la tarea: $e';
@@ -487,6 +592,7 @@ class ObrasViewModel extends ViewModelBase {
       _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
       _guardando = false;
       notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
     } catch (e) {
       _guardando = false;
       _mensajeError = 'No se pudo crear la obra: $e';
@@ -556,6 +662,7 @@ class ObrasViewModel extends ViewModelBase {
       _reportesPorObraCache.remove(obra.id);
       _guardando = false;
       notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
     } catch (e) {
       _guardando = false;
       _mensajeError = 'No se pudo guardar el informe diario: $e';
@@ -638,8 +745,14 @@ class ObrasViewModel extends ViewModelBase {
   void _procesarEventoGlobal(EventoDeApp evento) {
     switch (evento) {
       case SesionIniciada():
-        unawaited(cargar(forzarRecarga: true));
+        reanudarSincronizacionContinua();
+        unawaited(
+          cargar(forzarRecarga: true).then((_) {
+            unawaited(iniciarSincronizacionSilenciosa());
+          }),
+        );
       case SesionCerrada():
+        pausarSincronizacionContinua();
         _obrasRepository.limpiarCache();
         _todasLasObras = [];
         _reportes = [];
@@ -658,6 +771,7 @@ class ObrasViewModel extends ViewModelBase {
 
   @override
   void dispose() {
+    pausarSincronizacionContinua();
     _suscripcionConexion?.cancel();
     _suscripcionEventos?.cancel();
     _temporizadorAlertaSync?.cancel();

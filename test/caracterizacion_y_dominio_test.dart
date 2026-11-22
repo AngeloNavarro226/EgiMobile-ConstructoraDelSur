@@ -4,11 +4,13 @@ import 'package:constructora_del_sur/data/repositories/obras_repository.dart';
 import 'package:constructora_del_sur/data/repositories/preferencias_repository.dart';
 import 'package:constructora_del_sur/data/services/base_datos_local_service.dart';
 import 'package:constructora_del_sur/data/services/bus_de_eventos.dart';
+import 'package:constructora_del_sur/data/services/configuracion_supabase.dart';
 import 'package:constructora_del_sur/data/services/fuente_datos_remota.dart';
 import 'package:constructora_del_sur/data/services/mapa_service.dart';
 import 'package:constructora_del_sur/data/services/motor_sincronizacion.dart';
 import 'package:constructora_del_sur/data/services/multimedia_service.dart';
 import 'package:constructora_del_sur/data/services/sincronizacion_service.dart';
+import 'package:constructora_del_sur/data/services/supabase_remote_service.dart';
 import 'package:constructora_del_sur/data/services/voz_a_texto_service.dart';
 import 'package:constructora_del_sur/domain/models/evento_de_app.dart';
 import 'package:constructora_del_sur/domain/models/horarios.dart';
@@ -314,6 +316,37 @@ void main() {
       expect(reintento.tuvoErrores, isFalse);
       expect(remoto.reportesRemotos.length, 2);
 
+      // 5. Obra nueva con foto de portada sube automáticamente a Storage
+      await obrasRepo.guardarObra(
+        Obra(
+          id: 'obra_portada_1',
+          nombre: 'Obra Con Portada',
+          estado: EstadoObra.aTiempo,
+          fechaUltimoReporte: reloj.ahora(),
+          responsableId: 'u_capataz',
+          responsableNombre: 'Carlos Méndez (Capataz)',
+          tareas: const [],
+          materiales: const ['Cemento'],
+          ubicacion: const UbicacionObra(
+            latitud: -32.88,
+            longitud: -68.84,
+            direccion: 'Mendoza',
+          ),
+          conFoto: true,
+          imagen: 'AQIDBA==',
+        ),
+      );
+      final syncPortada = await obrasRepo.sincronizarTodo(
+        permitirSimulacionLocal: false,
+      );
+      expect(syncPortada.tuvoErrores, isFalse);
+      expect(remoto.fotosSubidas,
+          contains('fotos-obras/portadas/obra_portada_1.jpg'));
+      expect(
+        remoto.obrasRemotas['obra_portada_1']?['imagen_url'],
+        'https://storage.fake.local/fotos-obras/portadas/obra_portada_1.jpg',
+      );
+
       await bus.dispose();
     },
   );
@@ -602,6 +635,232 @@ void main() {
       );
       expect(resultadoOk, isTrue);
       expect(resultadoFallo, isFalse);
+    },
+  );
+
+  test(
+    'AutenticacionRepository con Supabase Auth cachea perfil sin contraseña y restaura offline',
+    () async {
+      final db = BaseDatosLocalService(insertarSemillasDePrueba: false);
+      final prefs = PreferenciasRepository();
+      final authRemota = FakeServicioAutenticacionRemota(
+        perfilesPorEmail: {
+          'capataz@constructoradelsur.com': {
+            'id': '11111111-1111-4111-8111-111111111102',
+            'username': 'capataz',
+            'rol_id': 'rol_capataz',
+            'rol_codigo': 'capataz',
+            'rol_nombre': 'Capataz de Obra',
+            'nombre': 'Carlos Méndez (Capataz)',
+            'telefono': '+54 9 261 555-0102',
+            'updated_at': DateTime.utc(2026, 11, 22).toIso8601String(),
+          },
+        },
+      );
+      final repo = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefs,
+        authRemota: authRemota,
+      );
+
+      // Acepta username corto y lo resuelve al dominio corporativo
+      final logueado = await repo.iniciarSesion(
+        identificador: 'capataz',
+        contrasenia: 'Password123!',
+      );
+      expect(logueado, isNotNull);
+      expect(authRemota.ultimoEmailRecibido, 'capataz@constructoradelsur.com');
+      expect(logueado!.contrasenia, isEmpty);
+      expect(logueado.rol, Rol.capataz);
+
+      // Sin red, restaura sesión desde SQLite local usando la sesión persistida
+      authRemota.simularOfflineEnRefresh = true;
+      final repoOffline = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefs,
+        authRemota: authRemota,
+      );
+      final restaurado = await repoOffline.restaurarSesionGuardada();
+      expect(restaurado?.id, '11111111-1111-4111-8111-111111111102');
+      expect(restaurado?.telefono, '+54 9 261 555-0102');
+
+      await repoOffline.cerrarSesion();
+      expect(authRemota.cerroSesionRemota, isTrue);
+      expect(repoOffline.usuarioActual, isNull);
+    },
+  );
+
+  test(
+    'ConfiguracionSupabase y mapeadores de SupabaseRemoteService convierten tipos SQLite <-> Postgres',
+    () {
+      const configVacia = ConfiguracionSupabase(url: '', publishableKey: '');
+      expect(configVacia.estaConfigurado, isFalse);
+
+      expect(
+        normalizarRutaEnBucket(
+          destinoStorage: 'fotos-obras/obra1/rep1_0.jpg',
+          bucket: 'fotos-obras',
+        ),
+        'obra1/rep1_0.jpg',
+      );
+
+      final usuarioRemoto = mapearUsuarioLocalARemoto({
+        'id': 'u1',
+        'username': 'capataz',
+        'rol_id': 'rol_capataz',
+        'nombre': 'Carlos',
+        'contrasenia': 'secreto',
+        'telefono': '+54 9 261 555-0102',
+        'sync_status': 'pending',
+      });
+      expect(usuarioRemoto.containsKey('contrasenia'), isFalse);
+      expect(usuarioRemoto.containsKey('sync_status'), isFalse);
+
+      final obraRemota = mapearObraLocalARemoto({
+        'id': 'o1',
+        'nombre': 'Torre',
+        'estado_semaforo': 'aTiempo',
+        'fecha_ultimo_reporte': '2026-11-22T00:00:00Z',
+        'responsable_id': 'u1',
+        'ubicacion_latitud': -32.88,
+        'ubicacion_longitud': -68.84,
+        'ubicacion_direccion': 'Mendoza',
+        'observaciones': '',
+        'con_foto': 1,
+        'imagen': null,
+        'imagen_url': null,
+        'finalizada': 0,
+      });
+      expect(obraRemota['con_foto'], isTrue);
+      expect(obraRemota['finalizada'], isFalse);
+
+      final obraLocal = mapearObraRemotaALocal({
+        ...obraRemota,
+        'updated_at': '2026-11-22T00:00:00Z',
+        'obra_materiales': [
+          {'nombre': 'Cemento'},
+        ],
+        'tareas_obra': [
+          {
+            'id': 't1',
+            'obra_id': 'o1',
+            'nombre': 'Excavación',
+            'completada': true,
+            'orden': 0,
+            'updated_at': '2026-11-22T00:00:00Z',
+          },
+        ],
+      });
+      expect(obraLocal['con_foto'], 1);
+      expect(obraLocal['finalizada'], 0);
+      expect(obraLocal['materiales'], ['Cemento']);
+      expect((obraLocal['tareas'] as List).first['completada'], 1);
+    },
+  );
+
+  test(
+    'Realtime dispara Pull silencioso automático en ObrasViewModel sin pulsar Sincronizar',
+    () async {
+      final reloj = RelojFijo(DateTime.utc(2026, 11, 22, 5, 0));
+      final db = BaseDatosLocalService(reloj: reloj);
+      final bus = BusDeEventos();
+      final remoto = FakeFuenteDatosRemota();
+      final authRemota = FakeServicioAutenticacionRemota(
+        perfilesPorEmail: {
+          'ingeniero@constructoradelsur.com': {
+            'id': 'u_ingeniero',
+            'username': 'ingeniero',
+            'rol_id': 'rol_ingeniero',
+            'rol_codigo': 'ingeniero',
+            'rol_nombre': 'Ingeniero Jefe de Obra',
+            'nombre': 'Ing. Braulio Hormigón',
+            'telefono': '+54 9 261 555-0101',
+            'updated_at': reloj.ahora().toIso8601String(),
+          },
+        },
+      );
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        authRemota: authRemota,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final motor = MotorSincronizacion(
+        baseDatosLocal: db,
+        fuenteRemota: remoto,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        reloj: reloj,
+        motorSincronizacion: motor,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        reloj: reloj,
+      );
+
+      final vm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(reloj: reloj),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+        reloj: reloj,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: 'Password123!',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // Otro dispositivo cambia el semáforo de la obra '2' a 'problemas'
+      remoto.cambiosParaPull = CambiosRemotos(
+        obras: [
+          {
+            'id': '2',
+            'nombre': 'Complejo Comercial Belgrano',
+            'estado_semaforo': 'problemas',
+            'fecha_ultimo_reporte': reloj.ahora().toIso8601String(),
+            'responsable_id': 'u_capataz',
+            'ubicacion_latitud': -32.8895,
+            'ubicacion_longitud': -68.8458,
+            'ubicacion_direccion': 'Av. Belgrano 820, Ciudad de Mendoza',
+            'observaciones': 'Cambio en tiempo real desde otro teléfono',
+            'con_foto': 1,
+            'imagen': 'assets/images/obra2.png',
+            'imagen_url': null,
+            'finalizada': 0,
+            'updated_at': reloj.ahora().toIso8601String(),
+            'tareas': const <Map<String, dynamic>>[],
+            'materiales': const ['Cemento Portland'],
+          },
+        ],
+      );
+
+      remoto.simularCambioRemoto('obras');
+      await Future<void>.delayed(const Duration(milliseconds: 1400));
+
+      final obraActualizada = vm.obtenerObraPorId('2');
+      expect(obraActualizada?.estado, EstadoObra.problemas);
+      expect(
+        obraActualizada?.observaciones,
+        'Cambio en tiempo real desde otro teléfono',
+      );
+
+      vm.dispose();
+      await remoto.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
     },
   );
 }

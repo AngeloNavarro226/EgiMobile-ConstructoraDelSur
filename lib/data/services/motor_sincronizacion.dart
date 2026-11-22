@@ -57,6 +57,9 @@ class MotorSincronizacion {
   /// Indica si hay un ciclo de sincronización ejecutándose actualmente.
   bool get enProgreso => _enProgreso;
 
+  /// Flujo en tiempo real de tablas modificadas en el servidor remoto.
+  Stream<String> escucharCambiosRemotos() => _remoto.escucharCambiosRemotos();
+
   /// Ejecuta el ciclo completo **Push -> Pull**.
   ///
   /// Cuando [_remoto] es [FuenteDatosRemotaOffline] (`estaDisponible == false`),
@@ -123,10 +126,35 @@ class MotorSincronizacion {
         }
       }
 
-      // 2. Push obras pendientes
-      for (final obra in await _local.obtenerPendientesDeTabla('obras')) {
+      // 2. Push obras pendientes (subiendo antes su foto de portada si es local)
+      for (final obraCruda in await _local.obtenerPendientesDeTabla('obras')) {
+        final obra = Map<String, dynamic>.from(obraCruda);
         final id = obra['id'] as String;
         try {
+          final imagenLocal = (obra['imagen'] as String?) ?? '';
+          final imagenUrlActual = (obra['imagen_url'] as String?) ?? '';
+          final requiereSubidaPortada = imagenLocal.isNotEmpty &&
+              !imagenLocal.startsWith('assets/') &&
+              !imagenLocal.startsWith('http://') &&
+              !imagenLocal.startsWith('https://') &&
+              imagenUrlActual.isEmpty;
+
+          if (requiereSubidaPortada) {
+            final bytesPortada = await _resolverBytesPortada(imagenLocal);
+            if (bytesPortada != null && bytesPortada.isNotEmpty) {
+              final urlRemota = await _remoto.subirFoto(
+                rutaLocal: imagenLocal,
+                destinoStorage: 'fotos-obras/portadas/$id.jpg',
+                bytes: bytesPortada,
+              );
+              await _local.actualizarImagenUrlObra(
+                obraId: id,
+                imagenUrl: urlRemota,
+              );
+              obra['imagen_url'] = urlRemota;
+            }
+          }
+
           final materiales = await _local.obtenerMaterialesDeObra(id);
           await _remoto.upsertObra(obra: obra, materiales: materiales);
           await _local.marcarEntidadSincronizada(tabla: 'obras', id: id);
@@ -257,11 +285,14 @@ class MotorSincronizacion {
         }
       }
 
-      // 6. Pull incremental respetando local-pending wins
+      // 6. Pull incremental respetando local-pending wins (con margen de 60 s
+      // para absorber desfases de reloj entre dispositivos y PostgreSQL)
       var descargados = 0;
       try {
         final ultimaSync = await _local.obtenerUltimaSyncUtc();
-        final cambios = await _remoto.obtenerCambiosDesde(ultimaSync);
+        final cursorConMargen =
+            ultimaSync?.subtract(const Duration(seconds: 60));
+        final cambios = await _remoto.obtenerCambiosDesde(cursorConMargen);
         descargados = await _aplicarCambiosRemotos(cambios);
         if (fallidos == 0) {
           await _local.guardarUltimaSyncUtc(ahoraUtc);
@@ -285,6 +316,19 @@ class MotorSincronizacion {
     } finally {
       _enProgreso = false;
     }
+  }
+
+  Future<Uint8List?> _resolverBytesPortada(String imagen) async {
+    final desdeArchivo = await plataforma_io.leerBytesDeArchivoLocal(imagen);
+    if (desdeArchivo != null && desdeArchivo.isNotEmpty) {
+      return desdeArchivo;
+    }
+    if (!imagen.contains('/') && !imagen.contains(r'\')) {
+      try {
+        return base64Decode(imagen);
+      } catch (_) {}
+    }
+    return null;
   }
 
   Future<Uint8List?> _resolverBytesFoto(Map<String, dynamic> foto) async {

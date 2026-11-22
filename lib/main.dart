@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'data/repositories/autenticacion_repository.dart';
 import 'data/repositories/notificaciones_repository.dart';
@@ -8,6 +9,7 @@ import 'data/repositories/obras_repository.dart';
 import 'data/repositories/preferencias_repository.dart';
 import 'data/services/base_datos_local_service.dart';
 import 'data/services/bus_de_eventos.dart';
+import 'data/services/configuracion_supabase.dart';
 import 'data/services/fuente_datos_remota.dart';
 import 'data/services/generador_ids.dart';
 import 'data/services/mapa_service.dart';
@@ -15,7 +17,9 @@ import 'data/services/motor_sincronizacion.dart';
 import 'data/services/multimedia_service.dart';
 import 'data/services/notificaciones_sistema_service.dart';
 import 'data/services/reloj.dart';
+import 'data/services/servicio_autenticacion_remota.dart';
 import 'data/services/sincronizacion_service.dart';
+import 'data/services/supabase_remote_service.dart';
 import 'data/services/voz_a_texto_service.dart';
 import 'domain/models/usuario.dart';
 import 'plataforma/capacidades.dart';
@@ -35,19 +39,40 @@ import 'ui/obras/widgets/inicio_ingeniero_screen.dart';
 import 'ui/perfil/view_models/perfil_view_model.dart';
 import 'ui/perfil/widgets/perfil_screen.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   // 1. Capacidades y políticas de plataforma/negocio
   const capacidades = Capacidades();
   const politicas = Politicas();
 
-  // 2. Capa de datos: Servicios
+  // 2. Capa de datos: Supabase (si se configuró por --dart-define) + Servicios
+  final configSupabase = ConfiguracionSupabase.desdeEntorno();
+  SupabaseClient? clienteSupabase;
+  if (configSupabase.estaConfigurado) {
+    await Supabase.initialize(
+      url: configSupabase.url,
+      publishableKey: configSupabase.publishableKey,
+    );
+    clienteSupabase = Supabase.instance.client;
+  }
+
   const reloj = RelojDelSistema();
   final generadorIds = GeneradorUuidV4();
   final busDeEventos = BusDeEventos();
-  const fuenteDatosRemota = FuenteDatosRemotaOffline();
-  final baseDatosService = BaseDatosLocalService(reloj: reloj);
+  final FuenteDatosRemota fuenteDatosRemota = clienteSupabase != null
+      ? SupabaseRemoteService(client: clienteSupabase)
+      : const FuenteDatosRemotaOffline();
+  final ServicioAutenticacionRemota authRemota = clienteSupabase != null
+      ? SupabaseAuthService(client: clienteSupabase)
+      : const ServicioAutenticacionRemotaOffline();
+  final baseDatosService = BaseDatosLocalService(
+    reloj: reloj,
+    insertarSemillasDePrueba: clienteSupabase == null,
+    nombreArchivo: clienteSupabase != null
+        ? BaseDatosLocalService.nombreArchivoSupabase
+        : BaseDatosLocalService.nombreArchivoDb,
+  );
   final motorSincronizacion = MotorSincronizacion(
     baseDatosLocal: baseDatosService,
     fuenteRemota: fuenteDatosRemota,
@@ -68,6 +93,7 @@ void main() {
   final autenticacionRepository = AutenticacionRepository(
     baseDatosService: baseDatosService,
     preferenciasRepository: preferenciasRepository,
+    authRemota: authRemota,
     reloj: reloj,
     busDeEventos: busDeEventos,
   );
@@ -240,8 +266,15 @@ class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
     _lifecycleListener = AppLifecycleListener(
       onResume: () {
         if (widget.autenticacionViewModel.tieneSesionActiva) {
-          unawaited(widget.obrasViewModel.cargar(forzarRecarga: true));
+          widget.obrasViewModel.reanudarSincronizacionContinua();
+          unawaited(widget.obrasViewModel.iniciarSincronizacionSilenciosa());
         }
+      },
+      onHide: () {
+        widget.obrasViewModel.pausarSincronizacionContinua();
+      },
+      onPause: () {
+        widget.obrasViewModel.pausarSincronizacionContinua();
       },
     );
   }

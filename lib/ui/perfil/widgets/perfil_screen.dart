@@ -65,8 +65,9 @@ class PerfilScreen extends StatelessWidget {
               TextField(
                 key: const Key('campo_perfil_contrasenia'),
                 controller: ctrlContrasenia,
+                obscureText: true,
                 decoration: const InputDecoration(
-                  labelText: 'Contraseña',
+                  labelText: 'Contraseña (opcional para cambiar)',
                   prefixIcon: Icon(Icons.lock_outline),
                   border: OutlineInputBorder(),
                 ),
@@ -81,8 +82,7 @@ class PerfilScreen extends StatelessWidget {
           ),
           FilledButton(
             onPressed: () async {
-              if (ctrlNombre.text.trim().isNotEmpty &&
-                  ctrlContrasenia.text.trim().isNotEmpty) {
+              if (ctrlNombre.text.trim().isNotEmpty) {
                 final ok = await viewModel.actualizarDatosPerfil(
                   nombre: ctrlNombre.text,
                   telefono: ctrlTelefono.text,

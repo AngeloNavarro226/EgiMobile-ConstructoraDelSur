@@ -18,20 +18,28 @@ class BaseDatosLocalService {
     DatabaseFactory? fabricaBaseDatos,
     Reloj reloj = const RelojDelSistema(),
     bool insertarSemillasDePrueba = true,
+    String nombreArchivo = nombreArchivoDb,
+    bool instanciaUnica = true,
   })  : _fabricaBaseDatos = fabricaBaseDatos,
         _reloj = reloj,
-        _insertarSemillasDePrueba = insertarSemillasDePrueba;
+        _insertarSemillasDePrueba = insertarSemillasDePrueba,
+        _nombreArchivo = nombreArchivo,
+        _instanciaUnica = instanciaUnica;
 
   static const nombreArchivoDb = 'constructora_del_sur_v4.db';
+  static const nombreArchivoSupabase = 'constructora_del_sur_supabase.db';
   static const versionEsquema = 2;
 
   final DatabaseFactory? _fabricaBaseDatos;
   final Reloj _reloj;
   final bool _insertarSemillasDePrueba;
+  final String _nombreArchivo;
+  final bool _instanciaUnica;
 
   Database? _db;
   bool _inicializado = false;
   bool _usarMemoriaFallback = kIsWeb;
+  Future<void>? _inicializacionEnCurso;
 
   final List<Map<String, dynamic>> _rolesMemoria = [];
   final List<Map<String, dynamic>> _usuariosMemoria = [];
@@ -54,17 +62,51 @@ class BaseDatosLocalService {
   String _ahoraUtcIso() => _reloj.ahora().toUtc().toIso8601String();
 
   /// Inicializa la base de datos SQLite con claves foráneas activas y migraciones.
+  ///
+  /// Reabre automáticamente la conexión si fue cerrada externamente (por ejemplo,
+  /// tras un Hot Restart o una tarea concurrente) y serializa aperturas paralelas.
   Future<void> inicializar() async {
-    if (_inicializado) return;
+    if (_inicializado &&
+        (_usarMemoriaFallback || (_db != null && _db!.isOpen))) {
+      return;
+    }
+
+    final enCurso = _inicializacionEnCurso;
+    if (enCurso != null) {
+      await enCurso;
+      if (_inicializado &&
+          (_usarMemoriaFallback || (_db != null && _db!.isOpen))) {
+        return;
+      }
+    }
+
+    final futuro = _abrirBaseDatos();
+    _inicializacionEnCurso = futuro;
+    try {
+      await futuro;
+    } finally {
+      if (identical(_inicializacionEnCurso, futuro)) {
+        _inicializacionEnCurso = null;
+      }
+    }
+  }
+
+  Future<void> _abrirBaseDatos() async {
+    if (_db != null && !_db!.isOpen) {
+      _db = null;
+      _inicializado = false;
+    }
+
     if (!_usarMemoriaFallback) {
       try {
         final fabrica = _fabricaBaseDatos ?? databaseFactory;
         final rutaBases = await fabrica.getDatabasesPath();
-        final rutaArchivo = p.join(rutaBases, nombreArchivoDb);
+        final rutaArchivo = p.join(rutaBases, _nombreArchivo);
         _db = await fabrica.openDatabase(
           rutaArchivo,
           options: OpenDatabaseOptions(
             version: versionEsquema,
+            singleInstance: _instanciaUnica,
             onConfigure: (db) async {
               await db.execute('PRAGMA foreign_keys = ON');
             },
@@ -553,10 +595,12 @@ class BaseDatosLocalService {
     ''');
   }
 
-  /// Inserta o actualiza un usuario en `usuarios` validando FK `rol_id`.
+  /// Inserta o actualiza un usuario en `usuarios` validando FK `rol_id` y
+  /// resolviendo colisiones de `username` (apoyado en `ON UPDATE CASCADE`).
   Future<void> guardarUsuarioCrudo(Map<String, dynamic> datos) async {
     await inicializar();
     final id = datos['id'] as String;
+    final username = datos['username'] as String;
     final rolId = datos['rol_id'] as String;
     final fila = {
       'telefono': '',
@@ -569,7 +613,10 @@ class BaseDatosLocalService {
       if (_buscarRolEnMemoria(rolId) == null) {
         throw StateError('Violación de FK: rol_id "$rolId" no existe.');
       }
-      final indice = _usuariosMemoria.indexWhere((u) => u['id'] == id);
+      var indice = _usuariosMemoria.indexWhere((u) => u['id'] == id);
+      if (indice == -1) {
+        indice = _usuariosMemoria.indexWhere((u) => u['username'] == username);
+      }
       if (indice == -1) {
         _usuariosMemoria.add(Map<String, dynamic>.from(fila));
       } else {
@@ -578,12 +625,20 @@ class BaseDatosLocalService {
       return;
     }
 
-    final actualizados = await _db!.update(
+    var actualizados = await _db!.update(
       'usuarios',
       fila,
       where: 'id = ?',
       whereArgs: [id],
     );
+    if (actualizados == 0) {
+      actualizados = await _db!.update(
+        'usuarios',
+        fila,
+        where: 'username = ?',
+        whereArgs: [username],
+      );
+    }
     if (actualizados == 0) {
       await _db!.insert('usuarios', fila);
     }
@@ -1199,6 +1254,28 @@ class BaseDatosLocalService {
       where: 'reporte_id = ?',
       whereArgs: [reporteId],
       orderBy: 'id ASC',
+    );
+  }
+
+  /// Actualiza la URL remota de la foto de portada de una obra tras subirla
+  /// al bucket de Storage.
+  Future<void> actualizarImagenUrlObra({
+    required String obraId,
+    required String imagenUrl,
+  }) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      final idx = _obrasMemoria.indexWhere((o) => o['id'] == obraId);
+      if (idx != -1) {
+        _obrasMemoria[idx] = {..._obrasMemoria[idx], 'imagen_url': imagenUrl};
+      }
+      return;
+    }
+    await _db!.update(
+      'obras',
+      {'imagen_url': imagenUrl},
+      where: 'id = ?',
+      whereArgs: [obraId],
     );
   }
 

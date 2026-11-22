@@ -65,6 +65,10 @@ abstract interface class FuenteDatosRemota {
 
   /// Descarga los cambios modificados con posterioridad a [ultimaSyncUtc].
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc);
+
+  /// Stream en tiempo real que emite el nombre de la tabla remota modificada
+  /// por otro dispositivo (respetando RLS).
+  Stream<String> escucharCambiosRemotos();
 }
 
 /// Implementación local/offline por defecto mientras Supabase Cloud no está
@@ -108,4 +112,7 @@ class FuenteDatosRemotaOffline implements FuenteDatosRemota {
   @override
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc) async =>
       const CambiosRemotos();
+
+  @override
+  Stream<String> escucharCambiosRemotos() => const Stream<String>.empty();
 }

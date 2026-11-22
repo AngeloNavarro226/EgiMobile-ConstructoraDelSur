@@ -216,29 +216,47 @@ class _InicioIngenieroScreenState extends State<InicioIngenieroScreen> {
                             ],
                           ),
                         )
-                      : visibles.isEmpty
-                          ? Center(
-                              child: Text(
-                                widget.viewModel.mostrarSoloFinalizadas
-                                    ? 'Aún no hay obras marcadas como finalizadas'
-                                    : 'No hay obras que coincidan con el filtro',
-                              ),
-                            )
-                          : GridView.builder(
-                              padding: const EdgeInsets.all(16),
-                              gridDelegate:
-                                  const SliverGridDelegateWithFixedCrossAxisCount(
-                                crossAxisCount: 2,
-                                crossAxisSpacing: 20,
-                                mainAxisSpacing: 16,
-                                childAspectRatio: 0.76,
-                              ),
-                              itemCount: visibles.length,
-                              itemBuilder: (context, i) => ObraCard(
-                                obra: visibles[i],
-                                onTap: () => _alSeleccionarObra(visibles[i]),
-                              ),
-                            ),
+                      : RefreshIndicator(
+                          onRefresh: widget.viewModel.refrescarManual,
+                          child: visibles.isEmpty
+                              ? ListView(
+                                  physics:
+                                      const AlwaysScrollableScrollPhysics(),
+                                  children: [
+                                    SizedBox(
+                                      height:
+                                          MediaQuery.of(context).size.height *
+                                              0.45,
+                                      child: Center(
+                                        child: Text(
+                                          widget.viewModel
+                                                  .mostrarSoloFinalizadas
+                                              ? 'Aún no hay obras marcadas como finalizadas'
+                                              : 'No hay obras que coincidan con el filtro',
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                )
+                              : GridView.builder(
+                                  physics:
+                                      const AlwaysScrollableScrollPhysics(),
+                                  padding: const EdgeInsets.all(16),
+                                  gridDelegate:
+                                      const SliverGridDelegateWithFixedCrossAxisCount(
+                                    crossAxisCount: 2,
+                                    crossAxisSpacing: 20,
+                                    mainAxisSpacing: 16,
+                                    childAspectRatio: 0.76,
+                                  ),
+                                  itemCount: visibles.length,
+                                  itemBuilder: (context, i) => ObraCard(
+                                    obra: visibles[i],
+                                    onTap: () =>
+                                        _alSeleccionarObra(visibles[i]),
+                                  ),
+                                ),
+                        ),
             ),
           ],
         );

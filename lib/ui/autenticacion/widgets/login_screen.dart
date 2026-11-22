@@ -86,7 +86,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         controller: _controladorUsuario,
                         onChanged: (_) => widget.viewModel.limpiarError(),
                         decoration: const InputDecoration(
-                          labelText: 'Usuario',
+                          labelText: 'Usuario o correo electrónico',
                           prefixIcon: Icon(Icons.person_outline),
                           border: OutlineInputBorder(),
                         ),

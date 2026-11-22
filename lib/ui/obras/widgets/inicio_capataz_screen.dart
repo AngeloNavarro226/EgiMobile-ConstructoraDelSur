@@ -204,30 +204,48 @@ class InicioCapatazScreen extends StatelessWidget {
                             ],
                           ),
                         )
-                      : obrasDelCapataz.isEmpty
-                          ? Center(
-                              child: Text(
-                                viewModel.mostrarSoloFinalizadas
-                                    ? 'No hay obras finalizadas asignadas a tu perfil.'
-                                    : 'No hay obras asignadas con el estado de semáforo seleccionado.',
-                              ),
-                            )
-                          : SingleChildScrollView(
-                              padding: const EdgeInsets.all(16),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
-                                children: [
-                                  for (final obra in obrasDelCapataz)
-                                    ObraItemCapataz(
-                                      obra: obra,
-                                      onTap: () => _mostrarSnackbarObraCapataz(
-                                        context,
-                                        obra,
+                      : RefreshIndicator(
+                          onRefresh: viewModel.refrescarManual,
+                          child: obrasDelCapataz.isEmpty
+                              ? ListView(
+                                  physics:
+                                      const AlwaysScrollableScrollPhysics(),
+                                  children: [
+                                    SizedBox(
+                                      height:
+                                          MediaQuery.of(context).size.height *
+                                              0.45,
+                                      child: Center(
+                                        child: Text(
+                                          viewModel.mostrarSoloFinalizadas
+                                              ? 'No hay obras finalizadas asignadas a tu perfil.'
+                                              : 'No hay obras asignadas con el estado de semáforo seleccionado.',
+                                        ),
                                       ),
                                     ),
-                                ],
-                              ),
-                            ),
+                                  ],
+                                )
+                              : SingleChildScrollView(
+                                  physics:
+                                      const AlwaysScrollableScrollPhysics(),
+                                  padding: const EdgeInsets.all(16),
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.stretch,
+                                    children: [
+                                      for (final obra in obrasDelCapataz)
+                                        ObraItemCapataz(
+                                          obra: obra,
+                                          onTap: () =>
+                                              _mostrarSnackbarObraCapataz(
+                                            context,
+                                            obra,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                        ),
             ),
           ],
         );

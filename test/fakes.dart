@@ -6,6 +6,7 @@ import 'package:constructora_del_sur/data/services/fuente_datos_remota.dart';
 import 'package:constructora_del_sur/data/services/generador_ids.dart';
 import 'package:constructora_del_sur/data/services/notificaciones_sistema_service.dart';
 import 'package:constructora_del_sur/data/services/reloj.dart';
+import 'package:constructora_del_sur/data/services/servicio_autenticacion_remota.dart';
 import 'package:constructora_del_sur/domain/models/aviso.dart';
 import 'package:constructora_del_sur/plataforma/capacidades.dart';
 import 'package:constructora_del_sur/plataforma/politicas.dart';
@@ -56,6 +57,18 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
   final Map<String, Map<String, dynamic>> tareasRemotas = {};
   final Map<String, Map<String, dynamic>> reportesRemotos = {};
   final Map<String, Map<String, dynamic>> notificacionesRemotas = {};
+  final StreamController<String> _cambiosRealtime =
+      StreamController<String>.broadcast();
+
+  void simularCambioRemoto(String tabla) {
+    if (!_cambiosRealtime.isClosed) {
+      _cambiosRealtime.add(tabla);
+    }
+  }
+
+  Future<void> dispose() async {
+    await _cambiosRealtime.close();
+  }
 
   void _verificarRed() {
     if (simularErrorRed) {
@@ -125,6 +138,66 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc) async {
     _verificarRed();
     return cambiosParaPull;
+  }
+
+  @override
+  Stream<String> escucharCambiosRemotos() => _cambiosRealtime.stream;
+}
+
+/// Implementación Fake de [ServicioAutenticacionRemota] para probar el flujo
+/// de Supabase Auth + respaldo offline sin red real.
+class FakeServicioAutenticacionRemota implements ServicioAutenticacionRemota {
+  FakeServicioAutenticacionRemota({
+    this.perfilesPorEmail = const {},
+    this.claveValida = 'Password123!',
+    this.simularOfflineEnRefresh = false,
+  });
+
+  final Map<String, Map<String, dynamic>> perfilesPorEmail;
+  final String claveValida;
+  bool simularOfflineEnRefresh;
+
+  String? _authUserIdActual;
+  String? ultimoEmailRecibido;
+  bool cerroSesionRemota = false;
+
+  @override
+  bool get estaDisponible => true;
+
+  @override
+  String? get usuarioAuthIdActual => _authUserIdActual;
+
+  @override
+  Future<Map<String, dynamic>?> iniciarSesion({
+    required String email,
+    required String password,
+  }) async {
+    ultimoEmailRecibido = email;
+    if (password != claveValida) return null;
+    final perfil = perfilesPorEmail[email];
+    if (perfil == null) return null;
+    _authUserIdActual = perfil['id'] as String;
+    return Map<String, dynamic>.from(perfil);
+  }
+
+  @override
+  Future<Map<String, dynamic>?> obtenerPerfilActual() async {
+    if (simularOfflineEnRefresh || _authUserIdActual == null) return null;
+    for (final perfil in perfilesPorEmail.values) {
+      if (perfil['id'] == _authUserIdActual) {
+        return Map<String, dynamic>.from(perfil);
+      }
+    }
+    return null;
+  }
+
+  @override
+  Future<void> actualizarContrasenia(String nuevaContrasenia) async {}
+
+  @override
+  Future<void> cerrarSesion() async {
+    cerroSesionRemota = true;
+    _authUserIdActual = null;
   }
 }
 

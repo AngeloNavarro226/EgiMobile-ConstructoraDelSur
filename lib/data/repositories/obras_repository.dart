@@ -311,6 +311,10 @@ class ObrasRepository {
     return resultado;
   }
 
+  /// Flujo en tiempo real de tablas modificadas en Supabase por otros usuarios.
+  Stream<String> escucharCambiosRemotos() =>
+      _motorSincronizacion.escucharCambiosRemotos();
+
   /// Mantiene compatibilidad directa devolviendo la cantidad sincronizada.
   Future<int> sincronizarReportesPendientes() async {
     final resultado = await sincronizarTodo(permitirSimulacionLocal: true);
