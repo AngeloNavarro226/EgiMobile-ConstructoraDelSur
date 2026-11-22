@@ -29,17 +29,6 @@ class _ExportarScreenState extends State<ExportarScreen> {
   void initState() {
     super.initState();
     unawaited(widget.viewModel.actualizarDatos());
-    widget.obrasViewModel.addListener(_sincronizarConObras);
-  }
-
-  @override
-  void dispose() {
-    widget.obrasViewModel.removeListener(_sincronizarConObras);
-    super.dispose();
-  }
-
-  void _sincronizarConObras() {
-    unawaited(widget.viewModel.actualizarDatos());
   }
 
   Future<void> _copiarAlPortapapeles() async {
@@ -55,6 +44,16 @@ class _ExportarScreenState extends State<ExportarScreen> {
   Future<void> _descargarArchivoExportado() async {
     final resultado = await widget.viewModel.exportarYDescargarArchivo();
     if (!mounted) return;
+    if (resultado == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            widget.viewModel.mensajeError ?? 'No se pudo exportar el archivo.',
+          ),
+        ),
+      );
+      return;
+    }
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         duration: const Duration(seconds: 5),
@@ -188,8 +187,7 @@ class _ExportarScreenState extends State<ExportarScreen> {
                   ),
                 ),
               ),
-              if (widget.viewModel.descargando)
-                const LinearProgressIndicator(),
+              if (widget.viewModel.descargando) const LinearProgressIndicator(),
               const SizedBox(height: 12),
               Row(
                 children: [

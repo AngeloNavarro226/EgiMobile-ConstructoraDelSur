@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../domain/models/reporte_diario.dart';
+import 'imagen_local_o_remota.dart';
 
 /// Renderiza una miniatura interactiva de una [FotoComprimida] almacenada en la
 /// aplicación (tanto si proviene de `bytesBase64` tomados con cámara/galería
@@ -193,22 +194,13 @@ class _ImagenDesdeFotoComprimida extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bytes = foto.bytesImagen;
-    if (bytes != null) {
-      return Image.memory(
-        bytes,
-        fit: fit,
-        errorBuilder: (_, __, ___) => const _PlaceholderFotoError(),
-      );
-    }
-    if (foto.esAsset) {
-      return Image.asset(
-        foto.rutaLocal,
-        fit: fit,
-        errorBuilder: (_, __, ___) => const _PlaceholderFotoError(),
-      );
-    }
-    return const _PlaceholderFotoError();
+    return ImagenLocalORemota(
+      bytesMemoria: foto.bytesImagen,
+      rutaLocal: foto.rutaLocal,
+      urlRemota: foto.urlRemota,
+      fit: fit,
+      placeholder: const _PlaceholderFotoError(),
+    );
   }
 }
 

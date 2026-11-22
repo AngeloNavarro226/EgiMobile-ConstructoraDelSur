@@ -1,29 +1,40 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Servicio que encapsula `SharedPreferencesAsync`
+/// Servicio que encapsula `SharedPreferencesAsync`.
 ///
 /// Centraliza las claves como constantes privadas y expone métodos con nombres
 /// del dominio (`obtenerTemaOscuro`, `guardarTemaOscuro`, `guardarBorradorInforme`,
-/// `limpiarPreferencias`), respaldando en memoria si el canal nativo no está
-/// montado durante pruebas unitarias.
+/// `obtenerUsuarioSesionId`, `limpiarPreferenciasDeSesion`), respaldando en
+/// memoria si el canal nativo no está montado durante pruebas unitarias.
 class PreferenciasService {
-  PreferenciasService([SharedPreferencesAsync? prefs])
-      : _prefs = prefs ?? SharedPreferencesAsync();
+  PreferenciasService([SharedPreferencesAsync? prefs]) : _prefs = prefs;
 
-  final SharedPreferencesAsync _prefs;
+  SharedPreferencesAsync? _prefs;
 
   static const _claveTemaOscuro = 'tema_oscuro';
   static const _claveRecibirAlertas = 'recibir_alertas_semaforo';
   static const _claveBorradorObservaciones = 'borrador_observaciones_informe';
+  static const _claveUsuarioSesionId = 'usuario_sesion_id';
 
   bool _temaOscuroMemoria = false;
   bool _recibirAlertasMemoria = true;
   String _borradorMemoria = '';
+  String? _usuarioSesionIdMemoria;
+
+  SharedPreferencesAsync? _obtenerPrefs() {
+    if (_prefs != null) return _prefs;
+    try {
+      _prefs = SharedPreferencesAsync();
+      return _prefs;
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Lee si el modo oscuro fue activado por el usuario.
   Future<bool> obtenerTemaOscuro() async {
     try {
-      final valor = await _prefs.getBool(_claveTemaOscuro);
+      final valor = await _obtenerPrefs()?.getBool(_claveTemaOscuro);
       if (valor != null) {
         _temaOscuroMemoria = valor;
       }
@@ -35,14 +46,14 @@ class PreferenciasService {
   Future<void> guardarTemaOscuro({required bool oscuro}) async {
     _temaOscuroMemoria = oscuro;
     try {
-      await _prefs.setBool(_claveTemaOscuro, oscuro);
+      await _obtenerPrefs()?.setBool(_claveTemaOscuro, oscuro);
     } catch (_) {}
   }
 
   /// Lee si las alertas proactivas de semáforo están habilitadas.
   Future<bool> obtenerRecibirAlertas() async {
     try {
-      final valor = await _prefs.getBool(_claveRecibirAlertas);
+      final valor = await _obtenerPrefs()?.getBool(_claveRecibirAlertas);
       if (valor != null) {
         _recibirAlertasMemoria = valor;
       }
@@ -54,7 +65,7 @@ class PreferenciasService {
   Future<void> guardarRecibirAlertas({required bool activo}) async {
     _recibirAlertasMemoria = activo;
     try {
-      await _prefs.setBool(_claveRecibirAlertas, activo);
+      await _obtenerPrefs()?.setBool(_claveRecibirAlertas, activo);
     } catch (_) {}
   }
 
@@ -62,14 +73,16 @@ class PreferenciasService {
   Future<void> guardarBorradorInforme(String texto) async {
     _borradorMemoria = texto;
     try {
-      await _prefs.setString(_claveBorradorObservaciones, texto);
+      await _obtenerPrefs()?.setString(_claveBorradorObservaciones, texto);
     } catch (_) {}
   }
 
   /// Recupera el borrador de observaciones guardado previamente.
   Future<String> obtenerBorradorInforme() async {
     try {
-      final valor = await _prefs.getString(_claveBorradorObservaciones);
+      final valor = await _obtenerPrefs()?.getString(
+        _claveBorradorObservaciones,
+      );
       if (valor != null) {
         _borradorMemoria = valor;
       }
@@ -77,12 +90,38 @@ class PreferenciasService {
     return _borradorMemoria;
   }
 
-  /// Limpia únicamente las claves propias usando `allowList`
+  /// Persiste el identificador de sesión local para arrancar offline sin login.
+  Future<void> guardarUsuarioSesionId(String? usuarioId) async {
+    _usuarioSesionIdMemoria = usuarioId;
+    try {
+      final prefs = _obtenerPrefs();
+      if (prefs == null) return;
+      if (usuarioId == null || usuarioId.isEmpty) {
+        await prefs.remove(_claveUsuarioSesionId);
+      } else {
+        await prefs.setString(_claveUsuarioSesionId, usuarioId);
+      }
+    } catch (_) {}
+  }
+
+  /// Recupera el identificador del usuario con sesión offline persistida.
+  Future<String?> obtenerUsuarioSesionId() async {
+    try {
+      final valor = await _obtenerPrefs()?.getString(_claveUsuarioSesionId);
+      if (valor != null && valor.isNotEmpty) {
+        _usuarioSesionIdMemoria = valor;
+      }
+    } catch (_) {}
+    return _usuarioSesionIdMemoria;
+  }
+
+  /// Limpia únicamente las claves propias de sesión usando `allowList`.
   Future<void> limpiarPreferenciasDeSesion() async {
     _borradorMemoria = '';
+    _usuarioSesionIdMemoria = null;
     try {
-      await _prefs.clear(
-        allowList: {_claveBorradorObservaciones},
+      await _obtenerPrefs()?.clear(
+        allowList: {_claveBorradorObservaciones, _claveUsuarioSesionId},
       );
     } catch (_) {}
   }

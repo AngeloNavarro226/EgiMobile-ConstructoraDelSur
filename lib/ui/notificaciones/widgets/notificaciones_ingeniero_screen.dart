@@ -126,8 +126,8 @@ class _NotificacionesIngenieroScreenState
                         'Recordatorio automático de abrir la aplicación para sincronizar los datos una vez al día.',
                       ),
                       value: recordatorio.activo,
-                      onChanged: (activo) => widget.viewModel
-                          .actualizarRecordatorioSincronizacion(
+                      onChanged: (activo) =>
+                          widget.viewModel.actualizarRecordatorioSincronizacion(
                         activo: activo,
                         hora: recordatorio.hora,
                         minuto: recordatorio.minuto,

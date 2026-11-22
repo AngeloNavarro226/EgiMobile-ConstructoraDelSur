@@ -9,7 +9,7 @@ import 'package:workmanager/workmanager.dart';
 const tareaSincronizacionWorkmanager = 'sincronizar_reportes_pendientes_task';
 
 /// Función pura que determina si la lista de resultados de `connectivity_plus`
-/// incluye al menos una interfaz con red
+/// incluye al menos una interfaz con red.
 bool hayAlgunaRed(List<ConnectivityResult> resultados) {
   return resultados.any(
     (r) =>
@@ -21,21 +21,24 @@ bool hayAlgunaRed(List<ConnectivityResult> resultados) {
 
 /// Lógica de la tarea de sincronización en segundo plano separada del
 /// dispatcher de Workmanager para poder probarla directamente en tests
-/// unitarios
+/// unitarios. Devuelve `false` ante errores transitorios para que Android
+/// aplique *backoff* y reintente automáticamente.
 Future<bool> ejecutarTareaSincronizacion(
   String nombreTarea,
-  Map<String, dynamic>? datosEntrada,
-) async {
+  Map<String, dynamic>? datosEntrada, {
+  Future<bool> Function()? ejecutor,
+}) async {
   try {
-    // En producción sincroniza los registros locales con `sync_status = pending`.
+    if (ejecutor != null) {
+      return await ejecutor();
+    }
     return true;
   } catch (_) {
     return false;
   }
 }
 
-/// Punto de entrada de nivel superior requerido por `Workmanager`
-///
+/// Punto de entrada de nivel superior requerido por `Workmanager`.
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((nombreTarea, datosEntrada) async {
@@ -48,7 +51,7 @@ void callbackDispatcher() {
 /// gestiona la sincronización en segundo plano (`workmanager`).
 ///
 /// Combina el chequeo puntual `checkConnectivity()` con el flujo continuo
-/// `onConnectivityChanged.map(hayAlgunaRed).distinct()`
+/// `onConnectivityChanged.map(hayAlgunaRed).distinct()`.
 class SincronizacionService {
   final Connectivity _connectivity = Connectivity();
   final StreamController<bool> _controladorEventosConexion =
@@ -60,7 +63,7 @@ class SincronizacionService {
   /// Stream que emite `true` cada vez que se detecta conexión activa (Wi-Fi o 4G).
   Stream<bool> get alDetectarConexion => _controladorEventosConexion.stream;
 
-  /// Consulta puntual del estado actual de conectividad
+  /// Consulta puntual del estado actual de conectividad.
   Future<bool> verificarConectividadActual() async {
     try {
       final resultados = await _connectivity.checkConnectivity();
@@ -99,15 +102,15 @@ class SincronizacionService {
     }
   }
 
-  /// Verifica el estado actual de la red o simula la detección de internet
-  /// para probar el flujo local de sincronización.
+  /// Dispara manualmente un evento de conectividad para probar el ciclo
+  /// local de sincronización.
   Future<void> dispararDeteccionDeInternet() async {
     if (!_controladorEventosConexion.isClosed) {
       _controladorEventosConexion.add(true);
     }
   }
 
-  /// Libera la suscripción a los cambios de red
+  /// Libera la suscripción a los cambios de red.
   void dispose() {
     _suscripcionRed?.cancel();
     _controladorEventosConexion.close();

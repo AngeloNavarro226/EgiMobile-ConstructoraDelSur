@@ -1,8 +1,7 @@
 import 'dart:math' as math;
 
 import '../../domain/models/ubicacion_obra.dart';
-import 'plataforma_io_stub.dart'
-    if (dart.library.io) 'plataforma_io_real.dart';
+import 'plataforma_io_stub.dart' if (dart.library.io) 'plataforma_io_real.dart';
 
 /// Servicio que provee ubicaciones geográficas de referencia en Mendoza y
 /// geocodificación inversa (transcripción del nombre del lugar a partir de
@@ -74,12 +73,20 @@ class MapaService {
       (-32.8489, -68.8392, 'Av. San Martín, Las Heras, Mendoza'),
       (-32.8150, -68.8210, 'Ruta Nacional 40 Norte, Las Heras, Mendoza'),
       (-32.8895, -68.8458, 'Microcentro / Av. San Martín, Ciudad de Mendoza'),
-      (-32.8930, -68.8615, 'Av. Emilio Civit / Parque Gral. San Martín, Mendoza'),
+      (
+        -32.8930,
+        -68.8615,
+        'Av. Emilio Civit / Parque Gral. San Martín, Mendoza'
+      ),
       (-32.9254, -68.8130, 'Carril Rodríguez Peña, Godoy Cruz, Mendoza'),
       (-32.9180, -68.8440, 'Centro / Av. San Martín Sur, Godoy Cruz, Mendoza'),
       (-32.9050, -68.7850, 'Acceso Este / Dorrego, Guaymallén, Mendoza'),
       (-32.8840, -68.7980, 'Av. Bandera de los Andes, Guaymallén, Mendoza'),
-      (-32.9612, -68.8540, 'Chacras de Coria / Ruta Panamericana, Luján de Cuyo'),
+      (
+        -32.9612,
+        -68.8540,
+        'Chacras de Coria / Ruta Panamericana, Luján de Cuyo'
+      ),
       (-33.0350, -68.8780, 'Centro de Luján de Cuyo, Mendoza'),
       (-32.9770, -68.7880, 'Centro de Maipú / Calle Ozamis, Maipú, Mendoza'),
     ];

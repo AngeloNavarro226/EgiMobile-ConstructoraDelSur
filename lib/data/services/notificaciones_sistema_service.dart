@@ -75,7 +75,8 @@ class NotificacionesSistemaService implements ServicioDeNotificaciones {
       // sin permiso, Android descarta el aviso en silencio.
       final permitido = await pedirPermiso();
       if (!permitido) {
-        debugPrint('[Notificaciones] Sin permiso: aviso "${aviso.titulo}" omitido');
+        debugPrint(
+            '[Notificaciones] Sin permiso: aviso "${aviso.titulo}" omitido');
         return;
       }
       await _canal.invokeMethod<bool>('mostrarNotificacion', {

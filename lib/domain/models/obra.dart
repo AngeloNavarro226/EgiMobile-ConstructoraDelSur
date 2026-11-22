@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'estado_sincronizacion.dart';
 import 'tarea_obra.dart';
 import 'ubicacion_obra.dart';
 
@@ -56,7 +57,11 @@ class Obra {
     this.observaciones = '',
     this.conFoto = false,
     this.imagen,
+    this.imagenUrl,
     this.finalizada = false,
+    this.updatedAt,
+    this.syncStatus = EstadoSincronizacion.synced,
+    this.deletedAt,
   });
 
   final String id;
@@ -71,21 +76,58 @@ class Obra {
   final String observaciones;
   final bool conFoto;
 
-  /// Puede ser una ruta de asset (`assets/images/obra1.png`) o una cadena
-  /// Base64 con los bytes comprimidos de la foto de portada elegida al crear la obra.
+  /// Ruta local en disco, ruta de asset (`assets/images/obra1.png`) o cadena
+  /// Base64 (compatibilidad web) de la foto de portada de la obra.
   final String? imagen;
 
+  /// URL remota de Supabase Storage cuando la portada ya fue sincronizada.
+  final String? imagenUrl;
+
   /// Indica si la obra fue marcada como finalizada.
-  ///
-  /// Las obras finalizadas se ocultan por defecto de las vistas principales y
-  /// solo se muestran cuando se selecciona el chip de filtro `"Finalizadas"`.
   final bool finalizada;
+
+  /// Última marca de tiempo de modificación en UTC para sincronización incremental.
+  final DateTime? updatedAt;
+
+  /// Estado de sincronización local-remoto de la obra.
+  final EstadoSincronizacion syncStatus;
+
+  /// Marca de borrado lógico en UTC (soft delete sincronizable).
+  final DateTime? deletedAt;
+
+  /// Indica si la portada apunta a un recurso remoto HTTP/HTTPS.
+  bool get esImagenRemota {
+    final url = imagenUrl ?? imagen;
+    if (url == null || url.isEmpty) return false;
+    return url.startsWith('http://') || url.startsWith('https://');
+  }
+
+  /// Indica si [imagen] apunta a un asset empaquetado de la aplicación.
+  bool get esImagenAsset => imagen != null && imagen!.startsWith('assets/');
+
+  /// Indica si [imagen] apunta a un archivo local en disco.
+  bool get esArchivoLocal {
+    final valor = imagen;
+    if (valor == null || valor.isEmpty) return false;
+    if (valor.startsWith('assets/') ||
+        valor.startsWith('http://') ||
+        valor.startsWith('https://')) {
+      return false;
+    }
+    return bytesImagenPortada == null;
+  }
 
   /// Si [imagen] contiene una fotografía personalizada codificada en Base64,
   /// devuelve sus bytes listos para renderizar con `Image.memory`.
   Uint8List? get bytesImagenPortada {
     final valor = imagen;
-    if (valor == null || valor.isEmpty || valor.startsWith('assets/')) {
+    if (valor == null ||
+        valor.isEmpty ||
+        valor.startsWith('assets/') ||
+        valor.startsWith('http://') ||
+        valor.startsWith('https://') ||
+        valor.contains('/') ||
+        valor.contains(r'\')) {
       return null;
     }
     try {
@@ -139,7 +181,11 @@ class Obra {
     String? observaciones,
     bool? conFoto,
     String? imagen,
+    String? imagenUrl,
     bool? finalizada,
+    DateTime? updatedAt,
+    EstadoSincronizacion? syncStatus,
+    DateTime? deletedAt,
   }) =>
       Obra(
         id: id,
@@ -154,39 +200,52 @@ class Obra {
         observaciones: observaciones ?? this.observaciones,
         conFoto: conFoto ?? this.conFoto,
         imagen: imagen ?? this.imagen,
+        imagenUrl: imagenUrl ?? this.imagenUrl,
         finalizada: finalizada ?? this.finalizada,
+        updatedAt: updatedAt ?? this.updatedAt,
+        syncStatus: syncStatus ?? this.syncStatus,
+        deletedAt: deletedAt ?? this.deletedAt,
       );
 
-  /// Convierte la obra a un mapa para almacenamiento en la tabla `obras` de SQLite.
+  /// Convierte la obra a una fila normalizada para la tabla `obras` de SQLite.
   Map<String, dynamic> toMap() => {
         'id': id,
         'nombre': nombre,
         'estado_semaforo': estado.toStorage(),
-        'fecha_ultimo_reporte': fechaUltimoReporte.toIso8601String(),
+        'fecha_ultimo_reporte': fechaUltimoReporte.toUtc().toIso8601String(),
         'responsable_id': responsableId,
-        'responsable_nombre': responsableNombre,
-        'tareas': jsonEncode(tareas.map((t) => t.toJson()).toList()),
-        'materiales': jsonEncode(materiales),
-        'ubicacion': jsonEncode(ubicacion.toJson()),
+        'ubicacion_latitud': ubicacion.latitud,
+        'ubicacion_longitud': ubicacion.longitud,
+        'ubicacion_direccion': ubicacion.direccion,
         'observaciones': observaciones,
         'con_foto': conFoto ? 1 : 0,
         'imagen': imagen,
+        'imagen_url': imagenUrl,
         'finalizada': finalizada ? 1 : 0,
+        'updated_at':
+            (updatedAt ?? fechaUltimoReporte).toUtc().toIso8601String(),
+        'sync_status': syncStatus.toStorage(),
+        'deleted_at': deletedAt?.toUtc().toIso8601String(),
       };
 
-  /// Reconstruye una instancia de [Obra] desde un registro de SQLite.
+  /// Reconstruye una instancia de [Obra] desde un registro normalizado de SQLite
+  /// enriquecido con `responsable_nombre`, `tareas` y `materiales`.
   factory Obra.fromMap(Map<String, dynamic> map) {
-    final tareasDecodificadas =
-        (jsonDecode(map['tareas'] as String) as List<dynamic>)
-            .map((item) => TareaObra.fromJson(item as Map<String, dynamic>))
-            .toList();
-    final materialesDecodificados =
-        (jsonDecode(map['materiales'] as String) as List<dynamic>)
-            .map((e) => e.toString())
-            .toList();
-    final ubicacionDecodificada = UbicacionObra.fromJson(
-      jsonDecode(map['ubicacion'] as String) as Map<String, dynamic>,
+    final tareasLista = (map['tareas'] as List<dynamic>? ?? const [])
+        .map((item) => TareaObra.fromMap(item as Map<String, dynamic>))
+        .toList();
+    final materialesLista = (map['materiales'] as List<dynamic>? ?? const [])
+        .map((e) => e.toString())
+        .toList();
+
+    final ubicacionDecodificada = UbicacionObra(
+      latitud: (map['ubicacion_latitud'] as num).toDouble(),
+      longitud: (map['ubicacion_longitud'] as num).toDouble(),
+      direccion: map['ubicacion_direccion'] as String,
     );
+
+    final updatedAtRaw = map['updated_at'] as String?;
+    final deletedAtRaw = map['deleted_at'] as String?;
 
     return Obra(
       id: map['id'] as String,
@@ -195,13 +254,19 @@ class Obra {
       fechaUltimoReporte: DateTime.parse(map['fecha_ultimo_reporte'] as String),
       responsableId: map['responsable_id'] as String,
       responsableNombre: (map['responsable_nombre'] as String?) ?? 'Capataz',
-      tareas: tareasDecodificadas,
-      materiales: materialesDecodificados,
+      tareas: tareasLista,
+      materiales: materialesLista,
       ubicacion: ubicacionDecodificada,
       observaciones: (map['observaciones'] as String?) ?? '',
       conFoto: (map['con_foto'] as int? ?? 0) == 1,
       imagen: map['imagen'] as String?,
+      imagenUrl: map['imagen_url'] as String?,
       finalizada: (map['finalizada'] as int? ?? 0) == 1,
+      updatedAt: updatedAtRaw != null ? DateTime.parse(updatedAtRaw) : null,
+      syncStatus: EstadoSincronizacion.fromStorage(
+        (map['sync_status'] as String?) ?? 'synced',
+      ),
+      deletedAt: deletedAtRaw != null ? DateTime.parse(deletedAtRaw) : null,
     );
   }
 }

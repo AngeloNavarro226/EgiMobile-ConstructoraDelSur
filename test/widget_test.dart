@@ -3,6 +3,7 @@ import 'package:constructora_del_sur/data/repositories/notificaciones_repository
 import 'package:constructora_del_sur/data/repositories/obras_repository.dart';
 import 'package:constructora_del_sur/data/repositories/preferencias_repository.dart';
 import 'package:constructora_del_sur/data/services/base_datos_local_service.dart';
+import 'package:constructora_del_sur/data/services/bus_de_eventos.dart';
 import 'package:constructora_del_sur/data/services/mapa_service.dart';
 import 'package:constructora_del_sur/data/services/multimedia_service.dart';
 import 'package:constructora_del_sur/data/services/sincronizacion_service.dart';
@@ -20,17 +21,27 @@ import 'fakes.dart';
 
 void main() {
   testWidgets(
-    'ConstructoraApp inicia en LoginScreen y muestra error al ingresar credenciales inválidas',
+    'ConstructoraApp inicia en LoginScreen, valida errores e ingresa mostrando el perfil con teléfono',
     (tester) async {
+      final bus = BusDeEventos();
       final db = BaseDatosLocalService();
-      final authRepo = AutenticacionRepository(baseDatosService: db);
-      final obrasRepo = ObrasRepository(baseDatosService: db);
+      final prefsRepo = PreferenciasRepository();
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefsRepo,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
       final notifFalsas = NotificacionesFalsas();
       final notifRepo = NotificacionesRepository(
         baseDatosService: db,
         notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
       );
-      final prefsRepo = PreferenciasRepository();
       final syncService = SincronizacionService();
 
       final authVm = AutenticacionViewModel(repositorio: authRepo);
@@ -44,15 +55,16 @@ void main() {
         mapaService: MapaService(),
         politicas: const PoliticasFalsas(),
         preferenciasRepository: prefsRepo,
+        busDeEventos: bus,
       );
-      await obrasVm.cargar();
-
-      final exportarVm = ExportarViewModel(obrasRepository: obrasRepo);
-      await exportarVm.actualizarDatos();
-
-      final notifVm = NotificacionesViewModel(repositorio: notifRepo);
-      await notifVm.cargar();
-
+      final exportarVm = ExportarViewModel(
+        obrasRepository: obrasRepo,
+        busDeEventos: bus,
+      );
+      final notifVm = NotificacionesViewModel(
+        repositorio: notifRepo,
+        busDeEventos: bus,
+      );
       final perfilVm = PerfilViewModel(
         autenticacionRepository: authRepo,
         preferenciasRepository: prefsRepo,
@@ -83,7 +95,25 @@ void main() {
         findsOneWidget,
       );
 
+      // Ingresar como capataz y verificar teléfono visible en Perfil
+      await tester.enterText(
+        find.byKey(const Key('campo_usuario')),
+        'capataz',
+      );
+      await tester.enterText(
+        find.byKey(const Key('campo_contrasenia')),
+        '1234',
+      );
+      await tester.tap(find.byKey(const Key('boton_iniciar_sesion')));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Perfil'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('+54 9 261 555-0102'), findsOneWidget);
+
       await notifFalsas.dispose();
+      await bus.dispose();
     },
   );
 }

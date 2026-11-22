@@ -80,8 +80,7 @@ class ResumenSemaforoBar extends StatelessWidget {
           for (final estado in EstadoObra.values)
             FilterChip(
               key: Key('chip_filtro_${estado.name}'),
-              selected:
-                  !mostrarSoloFinalizadas && estadoSeleccionado == estado,
+              selected: !mostrarSoloFinalizadas && estadoSeleccionado == estado,
               showCheckmark: false,
               avatar: Semaforo(estado, size: 12),
               label: Text(

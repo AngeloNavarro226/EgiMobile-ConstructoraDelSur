@@ -11,7 +11,9 @@ void simularPlataforma(TargetPlatform plataforma) {
 }
 
 void main() {
-  test('en Android el dispositivo tiene cámara, micrófono, GPS y trabajo en segundo plano', () {
+  test(
+      'en Android el dispositivo tiene cámara, micrófono, GPS y trabajo en segundo plano',
+      () {
     simularPlataforma(TargetPlatform.android);
     const cap = Capacidades();
     expect(cap.tieneCamara, isTrue);
@@ -22,7 +24,9 @@ void main() {
     expect(const Politicas().nombreDeLaTienda, 'Google Play');
   });
 
-  test('en iOS la tienda es la App Store y no se permiten enlaces externos en navegador', () {
+  test(
+      'en iOS la tienda es la App Store y no se permiten enlaces externos en navegador',
+      () {
     simularPlataforma(TargetPlatform.iOS);
     const pol = Politicas();
     expect(pol.nombreDeLaTienda, 'la App Store');

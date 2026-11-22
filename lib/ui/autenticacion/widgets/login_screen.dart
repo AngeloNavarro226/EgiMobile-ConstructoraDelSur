@@ -69,9 +69,10 @@ class _LoginScreenState extends State<LoginScreen> {
                       Text(
                         'Constructora Del Sur',
                         textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                              fontWeight: FontWeight.bold,
-                            ),
+                        style:
+                            Theme.of(context).textTheme.headlineSmall?.copyWith(
+                                  fontWeight: FontWeight.bold,
+                                ),
                       ),
                       const SizedBox(height: 4),
                       Text(
@@ -112,6 +113,18 @@ class _LoginScreenState extends State<LoginScreen> {
                           child: Text(
                             'Usuario o contraseña inválidos',
                             key: const Key('mensaje_credenciales_invalidas'),
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: colores.error,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      if (widget.viewModel.mensajeError != null)
+                        Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: Text(
+                            widget.viewModel.mensajeError!,
                             textAlign: TextAlign.center,
                             style: TextStyle(
                               color: colores.error,

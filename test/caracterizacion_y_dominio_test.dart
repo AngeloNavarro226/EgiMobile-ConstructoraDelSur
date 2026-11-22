@@ -1,25 +1,35 @@
 import 'package:constructora_del_sur/data/repositories/autenticacion_repository.dart';
 import 'package:constructora_del_sur/data/repositories/notificaciones_repository.dart';
 import 'package:constructora_del_sur/data/repositories/obras_repository.dart';
+import 'package:constructora_del_sur/data/repositories/preferencias_repository.dart';
 import 'package:constructora_del_sur/data/services/base_datos_local_service.dart';
 import 'package:constructora_del_sur/data/services/bus_de_eventos.dart';
+import 'package:constructora_del_sur/data/services/fuente_datos_remota.dart';
 import 'package:constructora_del_sur/data/services/mapa_service.dart';
+import 'package:constructora_del_sur/data/services/motor_sincronizacion.dart';
 import 'package:constructora_del_sur/data/services/multimedia_service.dart';
 import 'package:constructora_del_sur/data/services/sincronizacion_service.dart';
 import 'package:constructora_del_sur/data/services/voz_a_texto_service.dart';
 import 'package:constructora_del_sur/domain/models/evento_de_app.dart';
 import 'package:constructora_del_sur/domain/models/horarios.dart';
 import 'package:constructora_del_sur/domain/models/obra.dart';
+import 'package:constructora_del_sur/domain/models/reporte_diario.dart';
+import 'package:constructora_del_sur/domain/models/rol.dart';
 import 'package:constructora_del_sur/domain/models/tarea_obra.dart';
 import 'package:constructora_del_sur/domain/models/ubicacion_obra.dart';
-import 'package:constructora_del_sur/domain/models/usuario.dart';
 import 'package:constructora_del_sur/ui/autenticacion/view_models/autenticacion_view_model.dart';
+import 'package:constructora_del_sur/ui/core/view_model_base.dart';
+import 'package:constructora_del_sur/ui/exportar/view_models/exportar_view_model.dart';
+import 'package:constructora_del_sur/ui/notificaciones/view_models/notificaciones_view_model.dart';
 import 'package:constructora_del_sur/ui/obras/view_models/obras_view_model.dart';
+import 'package:constructora_del_sur/ui/perfil/view_models/perfil_view_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'fakes.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   test(
     'Obra calcula automáticamente el porcentaje de avance según tareas completas',
     () {
@@ -53,10 +63,14 @@ void main() {
   );
 
   test(
-    'Autenticación valida los 3 usuarios de prueba y rechaza credenciales inválidas',
+    'Autenticación valida usuarios, persiste sesión offline y rechaza credenciales inválidas',
     () async {
       final db = BaseDatosLocalService();
-      final repo = AutenticacionRepository(baseDatosService: db);
+      final prefs = PreferenciasRepository();
+      final repo = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefs,
+      );
       final vm = AutenticacionViewModel(repositorio: repo);
 
       final fallo = await vm.iniciarSesion(
@@ -72,22 +86,254 @@ void main() {
       );
       expect(okCapataz, isTrue);
       expect(vm.credencialesInvalidas, isFalse);
-      expect(vm.usuarioActual?.rol, RolUsuario.capataz);
+      expect(vm.usuarioActual?.rol, Rol.capataz);
+      expect(vm.usuarioActual?.rol.tipo, RolUsuario.capataz);
+      expect(vm.usuarioActual?.telefono, '+54 9 261 555-0102');
+
+      // Nueva instancia restaura la sesión offline desde PreferenciasRepository
+      final repoRestaurado = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefs,
+      );
+      final vmRestaurado = AutenticacionViewModel(repositorio: repoRestaurado);
+      final restaurado = await vmRestaurado.restaurarSesion();
+      expect(restaurado, isTrue);
+      expect(vmRestaurado.usuarioActual?.id, 'u_capataz');
+    },
+  );
+
+  test(
+    'Roles (1:N), columna telefono y normalización 3FN mantienen integridad sin anomalías',
+    () async {
+      final db = BaseDatosLocalService();
+      final authRepo = AutenticacionRepository(baseDatosService: db);
+      final obrasRepo = ObrasRepository(baseDatosService: db);
+
+      final roles = await authRepo.obtenerRoles();
+      expect(roles.length, 3);
+      expect(
+        roles.map((r) => r.codigo),
+        containsAll(['ingeniero', 'capataz', 'duenio']),
+      );
+
+      final usuarios = await authRepo.obtenerUsuarios();
+      expect(usuarios.length, 3);
+      expect(usuarios.first.toMap().containsKey('telefono'), isTrue);
+      expect(usuarios.first.toMap().containsKey('rol_id'), isTrue);
+
+      // Escalabilidad 1:N: permite crear un segundo capataz compartiendo rol_capataz
+      await db.guardarUsuarioCrudo({
+        'id': 'u_capataz_2',
+        'username': 'capataz2',
+        'rol_id': 'rol_capataz',
+        'nombre': 'Luis Gómez (Capataz)',
+        'contrasenia': '1234',
+        'telefono': '+54 9 261 555-0199',
+      });
+      final usuariosConSegundoCapataz =
+          await authRepo.obtenerUsuarios(forzarRecarga: true);
+      expect(usuariosConSegundoCapataz.length, 4);
+
+      // FK inválida sobre rol_id debe fallar
+      await expectLater(
+        () => db.guardarUsuarioCrudo({
+          'id': 'u_invalido',
+          'username': 'invalido',
+          'rol_id': 'rol_inexistente',
+          'nombre': 'Inválido',
+          'contrasenia': '1234',
+          'telefono': '',
+        }),
+        throwsStateError,
+      );
+
+      // Editar nombre y teléfono actualiza dinámicamente obras/reportes vía JOIN
+      await authRepo.iniciarSesion(
+        identificador: 'capataz',
+        contrasenia: '1234',
+      );
+      final actualizado = await authRepo.actualizarPerfil(
+        nombre: 'Carlos Méndez Actualizado',
+        telefono: '+54 9 261 999-8888',
+        contrasenia: '1234',
+      );
+      expect(actualizado.telefono, '+54 9 261 999-8888');
+      expect(actualizado.syncStatus, EstadoSincronizacion.pending);
+
+      final obras = await obrasRepo.obtenerObras(forzarRecarga: true);
+      final obraCapataz =
+          obras.firstWhere((o) => o.responsableId == 'u_capataz');
+      expect(obraCapataz.responsableNombre, 'Carlos Méndez Actualizado');
+
+      final reportes = await obrasRepo.obtenerReportesPorObra('1');
+      expect(reportes, isNotEmpty);
+      expect(reportes.first.autorNombre, 'Carlos Méndez Actualizado');
+
+      // FK inválida sobre obra_id en reporte debe fallar
+      await expectLater(
+        () => obrasRepo.registrarReporteDiario(
+          ReporteDiario(
+            id: 'rep_fk_error',
+            obraId: 'obra_inexistente',
+            obraNombre: '',
+            autorId: 'u_capataz',
+            autorNombre: 'Carlos Méndez Actualizado',
+            fechaCreacionLocal: DateTime.utc(2026, 10, 15),
+            tareaSeleccionada: 'Tarea',
+            tareaCompletadaEnInforme: false,
+            materialesUsados: const [],
+            observaciones: '',
+            urlFotos: const [],
+            estadoSemaforo: EstadoObra.aTiempo,
+          ),
+        ),
+        throwsStateError,
+      );
+    },
+  );
+
+  test(
+    'MotorSincronizacion ejecuta Push -> Pull con fotos, reintentos y local-pending wins',
+    () async {
+      final reloj = RelojFijo(DateTime.utc(2026, 11, 21, 15, 0));
+      final db = BaseDatosLocalService(reloj: reloj);
+      final bus = BusDeEventos();
+      final remoto = FakeFuenteDatosRemota(simularErrorRed: true);
+      final motor = MotorSincronizacion(
+        baseDatosLocal: db,
+        fuenteRemota: remoto,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        reloj: reloj,
+        generadorIds: GeneradorIdsSecuencial(prefijo: 'uuid'),
+        motorSincronizacion: motor,
+        busDeEventos: bus,
+      );
+
+      // Crear reporte offline con foto local pendiente
+      await obrasRepo.registrarReporteDiario(
+        ReporteDiario(
+          id: 'rep_offline_1',
+          obraId: '1',
+          obraNombre: 'Torre Residencial Las Heras',
+          autorId: 'u_capataz',
+          autorNombre: 'Carlos Méndez (Capataz)',
+          fechaCreacionLocal: reloj.ahora(),
+          tareaSeleccionada: 'Losa de planta alta',
+          tareaCompletadaEnInforme: false,
+          materialesUsados: const ['Hormigón H-21'],
+          observaciones: 'Reporte cargado sin señal',
+          urlFotos: const [
+            FotoComprimida(
+              rutaLocal: '/tmp/foto_terreno.jpg',
+              origen: 'Cámara en obra',
+              anchoPx: 800,
+              altoPx: 600,
+              calidadPct: 70,
+              pesoKb: 120,
+            ),
+          ],
+          estadoSemaforo: EstadoObra.demorada,
+        ),
+      );
+
+      // 1. Con falla de red: queda pending y se registra en cola_sincronizacion
+      final fallo = await obrasRepo.sincronizarTodo(
+        permitirSimulacionLocal: false,
+      );
+      expect(fallo.tuvoErrores, isTrue);
+      expect(fallo.fallidos, greaterThan(0));
+      final erroresCola = await db.obtenerFallosSincronizacion();
+      expect(erroresCola, isNotEmpty);
+
+      // 2. Al recuperar red: sube foto a Storage, hace upsert y pasa a synced
+      remoto.simularErrorRed = false;
+      remoto.cambiosParaPull = CambiosRemotos(
+        obras: [
+          {
+            'id': '2',
+            'nombre': 'Complejo Belgrano (Remoto)',
+            'estado_semaforo': 'aTiempo',
+            'fecha_ultimo_reporte':
+                DateTime.utc(2026, 11, 21, 14, 0).toIso8601String(),
+            'responsable_id': 'u_capataz',
+            'ubicacion_latitud': -32.8895,
+            'ubicacion_longitud': -68.8458,
+            'ubicacion_direccion': 'Av. Belgrano 820, Ciudad de Mendoza',
+            'observaciones': 'Actualizado desde otro dispositivo',
+            'con_foto': 1,
+            'imagen': 'assets/images/obra2.png',
+            'imagen_url': 'https://storage.fake.local/portada2.jpg',
+            'finalizada': 0,
+            'updated_at': DateTime.utc(2026, 11, 21, 14, 0).toIso8601String(),
+            'tareas': const <Map<String, dynamic>>[],
+            'materiales': const ['Cemento Portland'],
+          },
+        ],
+      );
+
+      final exito = await obrasRepo.sincronizarTodo(
+        permitirSimulacionLocal: false,
+      );
+      expect(exito.tuvoErrores, isFalse);
+      expect(
+          remoto.fotosSubidas, contains('fotos-obras/1/rep_offline_1_0.jpg'));
+      expect(remoto.reportesRemotos.containsKey('rep_offline_1'), isTrue);
+      expect(await db.obtenerFallosSincronizacion(), isEmpty);
+
+      final reporteSync = (await obrasRepo.obtenerReportesPorObra('1'))
+          .firstWhere((r) => r.id == 'rep_offline_1');
+      expect(reporteSync.syncStatus, EstadoSincronizacion.synced);
+      expect(
+        reporteSync.urlFotos.first.urlRemota,
+        'https://storage.fake.local/fotos-obras/1/rep_offline_1_0.jpg',
+      );
+
+      // Verificar que Pull aplicó la obra remota 2
+      final obra2 = (await obrasRepo.obtenerObras(forzarRecarga: true))
+          .firstWhere((o) => o.id == '2');
+      expect(obra2.nombre, 'Complejo Belgrano (Remoto)');
+      expect(obra2.imagenUrl, 'https://storage.fake.local/portada2.jpg');
+
+      // 3. Local-pending wins: una edición local en obra 2 no debe ser pisada por Pull
+      await obrasRepo.cambiarEstadoSemaforo('2', EstadoObra.problemas);
+      remoto.simularErrorRed = true;
+      await motor.sincronizarTodo(permitirSimulacionLocal: false);
+      final obra2TrasFallo = (await obrasRepo.obtenerObras(forzarRecarga: true))
+          .firstWhere((o) => o.id == '2');
+      expect(obra2TrasFallo.estado, EstadoObra.problemas);
+
+      // 4. Reintento idempotente sin duplicados
+      remoto.simularErrorRed = false;
+      final reintento = await obrasRepo.sincronizarTodo(
+        permitirSimulacionLocal: false,
+      );
+      expect(reintento.tuvoErrores, isFalse);
+      expect(remoto.reportesRemotos.length, 2);
+
+      await bus.dispose();
     },
   );
 
   test(
     'Obras finalizadas se ocultan por defecto y se muestran al activar el filtro Finalizadas',
     () async {
-      final reloj = RelojFijo(DateTime(2026, 10, 15, 10, 30));
-      final db = BaseDatosLocalService();
-      final authRepo = AutenticacionRepository(baseDatosService: db);
+      final reloj = RelojFijo(DateTime.utc(2026, 10, 15, 10, 30));
+      final db = BaseDatosLocalService(reloj: reloj);
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        reloj: reloj,
+      );
       final obrasRepo = ObrasRepository(baseDatosService: db, reloj: reloj);
       final notifFalsas = NotificacionesFalsas();
       final notifRepo = NotificacionesRepository(
         baseDatosService: db,
         notificacionesSistemaService: notifFalsas,
         reloj: reloj,
+        autenticacionRepository: authRepo,
       );
       final bus = BusDeEventos();
 
@@ -96,11 +342,12 @@ void main() {
         autenticacionRepository: authRepo,
         notificacionesRepository: notifRepo,
         sincronizacionService: SincronizacionService(),
-        multimediaService: MultimediaService(),
+        multimediaService: MultimediaService(reloj: reloj),
         vozATextoService: VozATextoService(),
         mapaService: MapaService(),
         politicas: const PoliticasFalsas(),
         busDeEventos: bus,
+        reloj: reloj,
       );
       await vm.cargar();
       await authRepo.iniciarSesion(
@@ -123,39 +370,178 @@ void main() {
         finalizarObra: true,
       );
 
-      // La obra finalizada se oculta de la vista por defecto
       expect(vm.cantidadFinalizadas, 1);
       expect(vm.obrasFiltradas.length, 5);
       expect(vm.obrasFiltradas.any((o) => o.id == primeraObra.id), isFalse);
 
-      // Al marcar el filtro "Finalizadas", muestra únicamente las obras finalizadas
       vm.alternarFiltroFinalizadas(true);
       expect(vm.mostrarSoloFinalizadas, isTrue);
       expect(vm.obrasFiltradas.length, 1);
       expect(vm.obrasFiltradas.first.id, primeraObra.id);
       expect(vm.obrasFiltradas.first.finalizada, isTrue);
 
+      vm.dispose();
       await notifFalsas.dispose();
       await bus.dispose();
     },
   );
 
   test(
-    'NotificacionesRepository usa PoliticaDeAvisos y NotificacionesFalsas sin plugin nativo',
+    'Todos los ViewModels notifican explícitamente en cargando, exito y error (y protegen dispose)',
+    () async {
+      final bus = BusDeEventos();
+      final dbOk = BaseDatosLocalService();
+      final dbErr = BaseDatosLocalConError();
+      final notifFalsas = NotificacionesFalsas();
+      final syncService = SincronizacionService();
+
+      // 1. ObrasViewModel: éxito y error
+      final obrasVmOk = ObrasViewModel(
+        obrasRepository: ObrasRepository(baseDatosService: dbOk),
+        autenticacionRepository:
+            AutenticacionRepository(baseDatosService: dbOk),
+        notificacionesRepository: NotificacionesRepository(
+          baseDatosService: dbOk,
+          notificacionesSistemaService: notifFalsas,
+          busDeEventos: bus,
+        ),
+        sincronizacionService: syncService,
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+      );
+      final estadosObrasOk = <EstadoCargaObras>[];
+      obrasVmOk.addListener(() => estadosObrasOk.add(obrasVmOk.estado));
+      await obrasVmOk.cargar();
+      expect(
+        estadosObrasOk,
+        [EstadoCargaObras.cargando, EstadoCargaObras.exito],
+      );
+
+      final obrasVmErr = ObrasViewModel(
+        obrasRepository: ObrasRepository(baseDatosService: dbErr),
+        autenticacionRepository:
+            AutenticacionRepository(baseDatosService: dbErr),
+        notificacionesRepository: NotificacionesRepository(
+          baseDatosService: dbErr,
+          notificacionesSistemaService: notifFalsas,
+        ),
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+      );
+      final estadosObrasErr = <EstadoCargaObras>[];
+      obrasVmErr.addListener(() => estadosObrasErr.add(obrasVmErr.estado));
+      await obrasVmErr.cargar();
+      expect(
+        estadosObrasErr,
+        [EstadoCargaObras.cargando, EstadoCargaObras.error],
+      );
+      expect(obrasVmErr.mensajeError, isNotNull);
+
+      // 2. AutenticacionViewModel: error de BD no bloquea estaCargando
+      final authVmErr = AutenticacionViewModel(
+        repositorio: AutenticacionRepository(baseDatosService: dbErr),
+      );
+      final estadosAuthErr = <EstadoOperacion>[];
+      authVmErr.addListener(() => estadosAuthErr.add(authVmErr.estado));
+      final okAuth = await authVmErr.iniciarSesion(
+        usuario: 'capataz',
+        contrasenia: '1234',
+      );
+      expect(okAuth, isFalse);
+      expect(authVmErr.estaCargando, isFalse);
+      expect(estadosAuthErr, [EstadoOperacion.cargando, EstadoOperacion.error]);
+      expect(authVmErr.mensajeError, isNotNull);
+
+      // 3. NotificacionesViewModel: éxito, error y refresco por BusDeEventos
+      final notifVmErr = NotificacionesViewModel(
+        repositorio: NotificacionesRepository(
+          baseDatosService: dbErr,
+          notificacionesSistemaService: notifFalsas,
+        ),
+      );
+      final estadosNotifErr = <EstadoOperacion>[];
+      notifVmErr.addListener(() => estadosNotifErr.add(notifVmErr.estado));
+      await notifVmErr.cargar();
+      expect(notifVmErr.cargando, isFalse);
+      expect(
+        estadosNotifErr,
+        [EstadoOperacion.cargando, EstadoOperacion.error],
+      );
+
+      // 4. ExportarViewModel: genera contenido asíncrono y notifica estados
+      final exportarVm = ExportarViewModel(
+        obrasRepository: ObrasRepository(baseDatosService: dbOk),
+        busDeEventos: bus,
+      );
+      final estadosExport = <EstadoOperacion>[];
+      exportarVm.addListener(() => estadosExport.add(exportarVm.estado));
+      await exportarVm.actualizarDatos();
+      expect(estadosExport, [EstadoOperacion.cargando, EstadoOperacion.exito]);
+      expect(exportarVm.contenidoExportado, contains('obra_id'));
+
+      // 5. PerfilViewModel: inicializarPreferencias + editar teléfono + dispose seguro
+      final prefsRepo = PreferenciasRepository();
+      final authRepoOk = AutenticacionRepository(baseDatosService: dbOk);
+      await authRepoOk.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      final perfilVm = PerfilViewModel(
+        autenticacionRepository: authRepoOk,
+        preferenciasRepository: prefsRepo,
+        sincronizacionService: syncService,
+      );
+      final estadosPerfil = <EstadoOperacion>[];
+      perfilVm.addListener(() => estadosPerfil.add(perfilVm.estado));
+      await perfilVm.inicializarPreferencias();
+      expect(estadosPerfil, [EstadoOperacion.cargando, EstadoOperacion.exito]);
+
+      final editOk = await perfilVm.actualizarDatosPerfil(
+        nombre: 'Ing. Braulio',
+        telefono: '+54 9 261 777-0000',
+        contrasenia: '1234',
+      );
+      expect(editOk, isTrue);
+      expect(perfilVm.usuarioActual?.telefono, '+54 9 261 777-0000');
+
+      // Dispose seguro: no lanza excepción si se invoca después
+      perfilVm.dispose();
+      await perfilVm.inicializarPreferencias();
+
+      obrasVmOk.dispose();
+      obrasVmErr.dispose();
+      authVmErr.dispose();
+      notifVmErr.dispose();
+      exportarVm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  test(
+    'NotificacionesRepository usa PoliticaDeAvisos, destinatarios dinámicos y NotificacionesFalsas',
     () async {
       final db = BaseDatosLocalService();
+      final authRepo = AutenticacionRepository(baseDatosService: db);
       final notifFalsas = NotificacionesFalsas();
       final repo = NotificacionesRepository(
         baseDatosService: db,
         notificacionesSistemaService: notifFalsas,
-        reloj: RelojFijo(DateTime(2026, 10, 15, 18, 0)),
+        reloj: RelojFijo(DateTime.utc(2026, 10, 15, 18, 0)),
+        autenticacionRepository: authRepo,
       );
 
       final obraVerde = Obra(
         id: '10',
         nombre: 'Obra Verde',
         estado: EstadoObra.aTiempo,
-        fechaUltimoReporte: DateTime(2026, 10, 15),
+        fechaUltimoReporte: DateTime.utc(2026, 10, 15),
         responsableId: 'u_capataz',
         responsableNombre: 'Capataz',
         tareas: const [],
@@ -173,12 +559,14 @@ void main() {
       expect(notifFalsas.mostradas, isEmpty);
 
       final obraRoja = obraVerde.copyWith(estado: EstadoObra.problemas);
-      await repo.emitirAlertaCambioSemaforo(
+      final alerta = await repo.emitirAlertaCambioSemaforo(
         obra: obraRoja,
         motivo: 'Falta de insumos',
       );
       expect(notifFalsas.mostradas.length, 1);
       expect(notifFalsas.mostradas.first.alTocar, 'obra:10');
+      expect(alerta?.destinatario, contains('Ing. Braulio Hormigón'));
+      expect(alerta?.destinatario, contains('Roberto Del Sur'));
 
       await notifFalsas.dispose();
     },
@@ -186,7 +574,7 @@ void main() {
 
   test(
     'Funciones puras de SegundoPlano y MapaService transcriben horarios y lugares',
-    () {
+    () async {
       final fijo = DateTime(2026, 6, 15, 9, 30);
       expect(horaDelRecordatorio(fijo), DateTime(2026, 6, 15, 18, 0));
       expect(
@@ -200,6 +588,20 @@ void main() {
 
       final evento = const SincronizacionCompletada(3);
       expect(evento.reportesSincronizados, 3);
+
+      // Workmanager devuelve false ante fallos transitorios para activar backoff
+      final resultadoOk = await ejecutarTareaSincronizacion(
+        tareaSincronizacionWorkmanager,
+        null,
+        ejecutor: () async => true,
+      );
+      final resultadoFallo = await ejecutarTareaSincronizacion(
+        tareaSincronizacionWorkmanager,
+        null,
+        ejecutor: () async => throw StateError('Red caída'),
+      );
+      expect(resultadoOk, isTrue);
+      expect(resultadoFallo, isFalse);
     },
   );
 }

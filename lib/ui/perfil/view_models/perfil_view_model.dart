@@ -1,18 +1,18 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
-
 import '../../../data/repositories/autenticacion_repository.dart';
 import '../../../data/repositories/notificaciones_repository.dart';
 import '../../../data/repositories/preferencias_repository.dart';
 import '../../../data/services/sincronizacion_service.dart';
 import '../../../domain/models/usuario.dart';
+import '../../core/view_model_base.dart';
 
 /// ViewModel de la pantalla de Perfil (compartida por Ingeniero, Capataz y Dueño).
 ///
-/// Gestiona la edición de los datos del usuario en SQLite, el cambio de tema
-/// oscuro, la preferencia de alertas y la prueba de detección de internet.
-class PerfilViewModel extends ChangeNotifier {
+/// Gestiona la carga inicial de preferencias persistidas, la edición del
+/// perfil en SQLite (incluyendo `telefono`), el cambio de tema oscuro y la
+/// preferencia de alertas.
+class PerfilViewModel extends ViewModelBase {
   PerfilViewModel({
     required AutenticacionRepository autenticacionRepository,
     required PreferenciasRepository preferenciasRepository,
@@ -28,6 +28,19 @@ class PerfilViewModel extends ChangeNotifier {
   final SincronizacionService _sincronizacionService;
   final NotificacionesRepository? _notificacionesRepository;
 
+  EstadoOperacion _estado = EstadoOperacion.inicial;
+  bool _guardando = false;
+  String? _mensajeError;
+
+  /// Estado de la última operación ejecutada en Perfil.
+  EstadoOperacion get estado => _estado;
+
+  /// Indica si se están guardando cambios de perfil.
+  bool get guardando => _guardando;
+
+  /// Último mensaje de error, si ocurrió alguno.
+  String? get mensajeError => _mensajeError;
+
   /// Usuario autenticado actualmente.
   Usuario? get usuarioActual => _autenticacionRepository.usuarioActual;
 
@@ -38,14 +51,31 @@ class PerfilViewModel extends ChangeNotifier {
   bool get notificacionesActivas =>
       _preferenciasRepository.recibirAlertasSemaforo;
 
+  /// Carga las preferencias guardadas (`modoOscuro`, alertas) desde disco y
+  /// notifica explícitamente a la app para aplicar el tema al iniciar.
+  Future<void> inicializarPreferencias() async {
+    _estado = EstadoOperacion.cargando;
+    _mensajeError = null;
+    notificarSiActivo();
+
+    try {
+      await _preferenciasRepository.inicializar();
+      _estado = EstadoOperacion.exito;
+      notificarSiActivo();
+    } catch (e) {
+      _estado = EstadoOperacion.error;
+      _mensajeError = 'No se pudieron cargar las preferencias: $e';
+      notificarSiActivo();
+    }
+  }
+
   /// Alterna entre el modo claro y oscuro.
   void alternarModoOscuro() {
     _preferenciasRepository.alternarModoOscuro();
-    notifyListeners();
+    notificarSiActivo();
   }
 
-  /// Activa o desactiva la recepción de alertas proactivas, pidiendo permiso
-  /// al sistema operativo en contexto si se habilitan
+  /// Activa o desactiva la recepción de alertas proactivas.
   void cambiarNotificaciones(bool valor) {
     _preferenciasRepository.cambiarRecibirAlertas(valor);
     if (valor) {
@@ -54,25 +84,40 @@ class PerfilViewModel extends ChangeNotifier {
             Future<bool>.value(true),
       );
     }
-    notifyListeners();
+    notificarSiActivo();
   }
 
   /// Actualiza el nombre, teléfono y contraseña del perfil en SQLite.
-  Future<void> actualizarDatosPerfil({
+  Future<bool> actualizarDatosPerfil({
     required String nombre,
     required String telefono,
     required String contrasenia,
   }) async {
-    await _autenticacionRepository.actualizarPerfil(
-      nombre: nombre,
-      telefono: telefono,
-      contrasenia: contrasenia,
-    );
-    notifyListeners();
+    _guardando = true;
+    _estado = EstadoOperacion.cargando;
+    _mensajeError = null;
+    notificarSiActivo();
+
+    try {
+      await _autenticacionRepository.actualizarPerfil(
+        nombre: nombre,
+        telefono: telefono,
+        contrasenia: contrasenia,
+      );
+      _guardando = false;
+      _estado = EstadoOperacion.exito;
+      notificarSiActivo();
+      return true;
+    } catch (e) {
+      _guardando = false;
+      _estado = EstadoOperacion.error;
+      _mensajeError = 'No se pudo actualizar el perfil: $e';
+      notificarSiActivo();
+      return false;
+    }
   }
 
-  /// Simula la detección de conexión a internet para verificar la alerta de
-  /// 2 segundos `"Comenzando sincronización"` en todas las vistas.
+  /// Dispara la detección de conexión a internet para ejecutar sincronización.
   Future<void> simularConexionInternet() async {
     await _sincronizacionService.dispararDeteccionDeInternet();
   }

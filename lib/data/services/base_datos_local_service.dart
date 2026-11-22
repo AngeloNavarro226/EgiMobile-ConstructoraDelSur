@@ -1,48 +1,85 @@
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:sqflite/sqflite.dart';
 
-/// Servicio de base de datos local SQLite (Offline-First) siguiendo
+import 'reloj.dart';
+
+/// Servicio de base de datos local SQLite (Offline-First) normalizada en 3FN.
 ///
-/// Recibe un [DatabaseFactory] opcional por constructor para permitir pruebas
-/// en memoria y utiliza siempre consultas parametrizadas (`where: '... = ?'` y
-/// `whereArgs: [...]`) para evitar inyección SQL.
+/// Características clave:
+/// - Activa `PRAGMA foreign_keys = ON` en cada conexión.
+/// - Mantiene migraciones incrementales en `onUpgrade` (`version: 2`) sin
+///   perder datos `pending` locales.
+/// - Soporta consultas filtradas/paginadas, escrituras granulares por tarea y
+///   metadatos de sincronización (`updated_at` UTC, `sync_status`, `deleted_at`,
+///   `estado_sincronizacion` y `cola_sincronizacion`).
 class BaseDatosLocalService {
-  BaseDatosLocalService({DatabaseFactory? fabricaBaseDatos})
-      : _fabricaBaseDatos = fabricaBaseDatos;
+  BaseDatosLocalService({
+    DatabaseFactory? fabricaBaseDatos,
+    Reloj reloj = const RelojDelSistema(),
+    bool insertarSemillasDePrueba = true,
+  })  : _fabricaBaseDatos = fabricaBaseDatos,
+        _reloj = reloj,
+        _insertarSemillasDePrueba = insertarSemillasDePrueba;
+
+  static const nombreArchivoDb = 'constructora_del_sur_v4.db';
+  static const versionEsquema = 2;
 
   final DatabaseFactory? _fabricaBaseDatos;
+  final Reloj _reloj;
+  final bool _insertarSemillasDePrueba;
+
   Database? _db;
   bool _inicializado = false;
   bool _usarMemoriaFallback = kIsWeb;
 
+  final List<Map<String, dynamic>> _rolesMemoria = [];
   final List<Map<String, dynamic>> _usuariosMemoria = [];
   final List<Map<String, dynamic>> _obrasMemoria = [];
+  final List<Map<String, dynamic>> _tareasObraMemoria = [];
+  final List<Map<String, dynamic>> _obraMaterialesMemoria = [];
   final List<Map<String, dynamic>> _reportesMemoria = [];
+  final List<Map<String, dynamic>> _reporteMaterialesMemoria = [];
+  final List<Map<String, dynamic>> _reporteFotosMemoria = [];
   final List<Map<String, dynamic>> _notificacionesMemoria = [];
+  final List<Map<String, dynamic>> _colaSyncMemoria = [];
+  String? _ultimaSyncUtcMemoria;
   Map<String, dynamic> _configRecordatorioMemoria = {
+    'id': 1,
     'activo': 1,
     'hora': 18,
     'minuto': 0,
   };
 
-  /// Inicializa la base de datos SQLite y asegura las semillas de prueba.
+  String _ahoraUtcIso() => _reloj.ahora().toUtc().toIso8601String();
+
+  /// Inicializa la base de datos SQLite con claves foráneas activas y migraciones.
   Future<void> inicializar() async {
     if (_inicializado) return;
     if (!_usarMemoriaFallback) {
       try {
         final fabrica = _fabricaBaseDatos ?? databaseFactory;
         final rutaBases = await fabrica.getDatabasesPath();
-        final rutaArchivo = p.join(rutaBases, 'constructora_del_sur_v3.db');
+        final rutaArchivo = p.join(rutaBases, nombreArchivoDb);
         _db = await fabrica.openDatabase(
           rutaArchivo,
           options: OpenDatabaseOptions(
-            version: 1,
+            version: versionEsquema,
+            onConfigure: (db) async {
+              await db.execute('PRAGMA foreign_keys = ON');
+            },
             onCreate: (db, version) async {
               await _crearTablasSql(db);
-              await _insertarSemillasSql(db);
+              await _crearIndicesSql(db);
+              await _insertarCatalogoRolesSql(db);
+              if (_insertarSemillasDePrueba) {
+                await _insertarSemillasSql(db);
+              }
+            },
+            onUpgrade: (db, oldVersion, newVersion) async {
+              if (oldVersion < 2) {
+                await _migrarV1AV2(db);
+              }
             },
           ),
         );
@@ -53,21 +90,37 @@ class BaseDatosLocalService {
       }
     }
 
-    if (_usarMemoriaFallback && _usuariosMemoria.isEmpty) {
-      _cargarSemillasEnMemoria();
+    if (_usarMemoriaFallback && _rolesMemoria.isEmpty) {
+      _rolesMemoria.addAll(_semillasRoles());
+      if (_insertarSemillasDePrueba) {
+        _cargarSemillasEnMemoria();
+      }
     }
     _inicializado = true;
   }
 
   Future<void> _crearTablasSql(Database db) async {
     await db.execute('''
+      CREATE TABLE roles (
+        id TEXT PRIMARY KEY,
+        codigo TEXT NOT NULL UNIQUE,
+        nombre TEXT NOT NULL
+      )
+    ''');
+
+    await db.execute('''
       CREATE TABLE usuarios (
         id TEXT PRIMARY KEY,
-        username TEXT NOT NULL,
-        rol TEXT NOT NULL,
+        username TEXT NOT NULL UNIQUE,
+        rol_id TEXT NOT NULL,
         nombre TEXT NOT NULL,
         contrasenia TEXT NOT NULL,
-        telefono TEXT NOT NULL
+        telefono TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        FOREIGN KEY (rol_id) REFERENCES roles(id)
+          ON UPDATE CASCADE
+          ON DELETE RESTRICT
       )
     ''');
 
@@ -78,14 +131,46 @@ class BaseDatosLocalService {
         estado_semaforo TEXT NOT NULL,
         fecha_ultimo_reporte TEXT NOT NULL,
         responsable_id TEXT NOT NULL,
-        responsable_nombre TEXT NOT NULL,
-        tareas TEXT NOT NULL,
-        materiales TEXT NOT NULL,
-        ubicacion TEXT NOT NULL,
+        ubicacion_latitud REAL NOT NULL,
+        ubicacion_longitud REAL NOT NULL,
+        ubicacion_direccion TEXT NOT NULL,
         observaciones TEXT NOT NULL,
         con_foto INTEGER NOT NULL DEFAULT 0,
         imagen TEXT,
-        finalizada INTEGER NOT NULL DEFAULT 0
+        imagen_url TEXT,
+        finalizada INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        deleted_at TEXT,
+        FOREIGN KEY (responsable_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
+          ON DELETE RESTRICT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE tareas_obra (
+        id TEXT PRIMARY KEY,
+        obra_id TEXT NOT NULL,
+        nombre TEXT NOT NULL,
+        completada INTEGER NOT NULL DEFAULT 0,
+        orden INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        FOREIGN KEY (obra_id) REFERENCES obras(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE obra_materiales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        obra_id TEXT NOT NULL,
+        nombre TEXT NOT NULL,
+        FOREIGN KEY (obra_id) REFERENCES obras(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
       )
     ''');
 
@@ -93,29 +178,69 @@ class BaseDatosLocalService {
       CREATE TABLE reportes_diarios (
         id TEXT PRIMARY KEY,
         obra_id TEXT NOT NULL,
-        obra_nombre TEXT NOT NULL,
+        autor_id TEXT NOT NULL,
         fecha_creacion_local TEXT NOT NULL,
         fecha_sincronizacion TEXT,
-        tareas TEXT NOT NULL,
+        tarea_seleccionada TEXT NOT NULL,
         tarea_completada INTEGER NOT NULL DEFAULT 0,
-        materiales TEXT NOT NULL,
         observaciones TEXT NOT NULL,
-        url_fotos TEXT NOT NULL,
         estado_semaforo TEXT NOT NULL,
-        autor_nombre TEXT NOT NULL,
         sync_status TEXT NOT NULL,
-        obra_finalizada INTEGER NOT NULL DEFAULT 0
+        obra_finalizada INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY (obra_id) REFERENCES obras(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE,
+        FOREIGN KEY (autor_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
+          ON DELETE RESTRICT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE reporte_materiales (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reporte_id TEXT NOT NULL,
+        nombre TEXT NOT NULL,
+        FOREIGN KEY (reporte_id) REFERENCES reportes_diarios(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE reporte_fotos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        reporte_id TEXT NOT NULL,
+        ruta_local TEXT NOT NULL,
+        origen TEXT NOT NULL,
+        ancho_px INTEGER NOT NULL,
+        alto_px INTEGER NOT NULL,
+        calidad_pct INTEGER NOT NULL,
+        peso_kb INTEGER NOT NULL,
+        bytes_base64 TEXT,
+        url_remota TEXT,
+        estado_subida TEXT NOT NULL DEFAULT 'pending',
+        FOREIGN KEY (reporte_id) REFERENCES reportes_diarios(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
       )
     ''');
 
     await db.execute('''
       CREATE TABLE notificaciones (
         id TEXT PRIMARY KEY,
+        obra_id TEXT,
         titulo TEXT NOT NULL,
         mensaje TEXT NOT NULL,
         destinatario TEXT NOT NULL,
         fecha_hora TEXT NOT NULL,
-        es_alerta_semaforo INTEGER NOT NULL DEFAULT 0
+        es_alerta_semaforo INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        FOREIGN KEY (obra_id) REFERENCES obras(id)
+          ON UPDATE CASCADE
+          ON DELETE SET NULL
       )
     ''');
 
@@ -127,6 +252,187 @@ class BaseDatosLocalService {
         minuto INTEGER NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE estado_sincronizacion (
+        id INTEGER PRIMARY KEY,
+        ultima_sync_utc TEXT
+      )
+    ''');
+
+    await db.execute('''
+      CREATE TABLE cola_sincronizacion (
+        id TEXT PRIMARY KEY,
+        entidad TEXT NOT NULL,
+        entidad_id TEXT NOT NULL,
+        operacion TEXT NOT NULL,
+        reintentos INTEGER NOT NULL DEFAULT 0,
+        ultimo_error TEXT,
+        creado_en TEXT NOT NULL
+      )
+    ''');
+  }
+
+  Future<void> _crearIndicesSql(Database db) async {
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_usuarios_rol_id ON usuarios(rol_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_obras_responsable_id '
+      'ON obras(responsable_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_obras_sync_status ON obras(sync_status)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_tareas_obra_obra_id '
+      'ON tareas_obra(obra_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_tareas_obra_sync_status '
+      'ON tareas_obra(sync_status)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_obra_materiales_obra_id '
+      'ON obra_materiales(obra_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_reportes_diarios_obra_id '
+      'ON reportes_diarios(obra_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_reportes_diarios_autor_id '
+      'ON reportes_diarios(autor_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_reportes_diarios_sync_status '
+      'ON reportes_diarios(sync_status)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_reporte_materiales_reporte_id '
+      'ON reporte_materiales(reporte_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_reporte_fotos_reporte_id '
+      'ON reporte_fotos(reporte_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_notificaciones_obra_id '
+      'ON notificaciones(obra_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_cola_sync_entidad '
+      'ON cola_sincronizacion(entidad, entidad_id)',
+    );
+  }
+
+  /// Migración incremental v1 -> v2 preservando los datos locales existentes.
+  Future<void> _migrarV1AV2(Database db) async {
+    final ahora = _ahoraUtcIso();
+    await db.execute('PRAGMA foreign_keys = OFF');
+    try {
+      await db.transaction((txn) async {
+        await txn.execute('''
+          CREATE TABLE usuarios_v2 (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            rol_id TEXT NOT NULL,
+            nombre TEXT NOT NULL,
+            contrasenia TEXT NOT NULL,
+            telefono TEXT NOT NULL DEFAULT '',
+            updated_at TEXT NOT NULL,
+            sync_status TEXT NOT NULL DEFAULT 'synced',
+            FOREIGN KEY (rol_id) REFERENCES roles(id)
+              ON UPDATE CASCADE
+              ON DELETE RESTRICT
+          )
+        ''');
+        await txn.execute(
+          '''
+          INSERT INTO usuarios_v2
+            (id, username, rol_id, nombre, contrasenia, telefono, updated_at, sync_status)
+          SELECT
+            id, username, rol_id, nombre, contrasenia, '', ?, 'synced'
+          FROM usuarios
+          ''',
+          [ahora],
+        );
+        await txn.execute('DROP TABLE usuarios');
+        await txn.execute('ALTER TABLE usuarios_v2 RENAME TO usuarios');
+
+        await txn.execute('ALTER TABLE obras ADD COLUMN imagen_url TEXT');
+        await txn.execute(
+          "ALTER TABLE obras ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+        );
+        await txn.execute(
+          "ALTER TABLE obras ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
+        );
+        await txn.execute('ALTER TABLE obras ADD COLUMN deleted_at TEXT');
+
+        await txn.execute(
+          "ALTER TABLE tareas_obra ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+        );
+        await txn.execute(
+          "ALTER TABLE tareas_obra ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
+        );
+
+        await txn.execute(
+          "ALTER TABLE reportes_diarios ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+        );
+
+        await txn.execute(
+          'ALTER TABLE reporte_fotos ADD COLUMN url_remota TEXT',
+        );
+        await txn.execute(
+          "ALTER TABLE reporte_fotos ADD COLUMN estado_subida TEXT NOT NULL DEFAULT 'synced'",
+        );
+
+        await txn.execute(
+          "ALTER TABLE notificaciones ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+        );
+        await txn.execute(
+          "ALTER TABLE notificaciones ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
+        );
+
+        await txn.execute('''
+          CREATE TABLE IF NOT EXISTS estado_sincronizacion (
+            id INTEGER PRIMARY KEY,
+            ultima_sync_utc TEXT
+          )
+        ''');
+        await txn.execute('''
+          CREATE TABLE IF NOT EXISTS cola_sincronizacion (
+            id TEXT PRIMARY KEY,
+            entidad TEXT NOT NULL,
+            entidad_id TEXT NOT NULL,
+            operacion TEXT NOT NULL,
+            reintentos INTEGER NOT NULL DEFAULT 0,
+            ultimo_error TEXT,
+            creado_en TEXT NOT NULL
+          )
+        ''');
+      });
+      await _crearIndicesSql(db);
+    } finally {
+      await db.execute('PRAGMA foreign_keys = ON');
+    }
+  }
+
+  Future<void> _insertarCatalogoRolesSql(Database db) async {
+    for (final rol in _semillasRoles()) {
+      await db.insert('roles', rol,
+          conflictAlgorithm: ConflictAlgorithm.ignore);
+    }
+    await db.insert(
+      'configuracion_recordatorio',
+      {'id': 1, 'activo': 1, 'hora': 18, 'minuto': 0},
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
+    await db.insert(
+      'estado_sincronizacion',
+      {'id': 1, 'ultima_sync_utc': null},
+      conflictAlgorithm: ConflictAlgorithm.ignore,
+    );
   }
 
   Future<void> _insertarSemillasSql(Database db) async {
@@ -136,18 +442,24 @@ class BaseDatosLocalService {
     for (final obra in _semillasObras()) {
       await db.insert('obras', obra);
     }
+    for (final tarea in _semillasTareasObra()) {
+      await db.insert('tareas_obra', tarea);
+    }
+    for (final material in _semillasObraMateriales()) {
+      await db.insert('obra_materiales', material);
+    }
     for (final reporte in _semillasReportes()) {
       await db.insert('reportes_diarios', reporte);
+    }
+    for (final material in _semillasReporteMateriales()) {
+      await db.insert('reporte_materiales', material);
+    }
+    for (final foto in _semillasReporteFotos()) {
+      await db.insert('reporte_fotos', foto);
     }
     for (final notificacion in _semillasNotificaciones()) {
       await db.insert('notificaciones', notificacion);
     }
-    await db.insert('configuracion_recordatorio', {
-      'id': 1,
-      'activo': 1,
-      'hora': 18,
-      'minuto': 0,
-    });
   }
 
   void _cargarSemillasEnMemoria() {
@@ -157,108 +469,639 @@ class BaseDatosLocalService {
     _obrasMemoria
       ..clear()
       ..addAll(_semillasObras());
+    _tareasObraMemoria
+      ..clear()
+      ..addAll(_semillasTareasObra());
+    _obraMaterialesMemoria
+      ..clear()
+      ..addAll(_semillasObraMateriales());
     _reportesMemoria
       ..clear()
       ..addAll(_semillasReportes());
+    _reporteMaterialesMemoria
+      ..clear()
+      ..addAll(_semillasReporteMateriales());
+    _reporteFotosMemoria
+      ..clear()
+      ..addAll(_semillasReporteFotos());
     _notificacionesMemoria
       ..clear()
       ..addAll(_semillasNotificaciones());
   }
 
-  /// Obtiene todos los registros crudos de la tabla `usuarios`.
+  /// Obtiene todos los registros crudos de la tabla `roles`.
+  Future<List<Map<String, dynamic>>> obtenerRolesCrudos() async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      return _rolesMemoria.map(Map<String, dynamic>.from).toList();
+    }
+    return _db!.query('roles', orderBy: 'id ASC');
+  }
+
+  /// Inserta o actualiza un rol en el catálogo `roles`.
+  Future<void> guardarRolCrudo(Map<String, dynamic> rol) async {
+    await inicializar();
+    final id = rol['id'] as String;
+    if (_usarMemoriaFallback) {
+      final idx = _rolesMemoria.indexWhere((r) => r['id'] == id);
+      if (idx == -1) {
+        _rolesMemoria.add(Map<String, dynamic>.from(rol));
+      } else {
+        _rolesMemoria[idx] = Map<String, dynamic>.from(rol);
+      }
+      return;
+    }
+    final actualizados = await _db!.update(
+      'roles',
+      rol,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    if (actualizados == 0) {
+      await _db!.insert('roles', rol);
+    }
+  }
+
+  /// Obtiene todos los usuarios unidos a su rol (`roles`) en relación 1:N.
   Future<List<Map<String, dynamic>>> obtenerUsuariosCrudos() async {
     await inicializar();
     if (_usarMemoriaFallback) {
-      return List<Map<String, dynamic>>.from(_usuariosMemoria);
+      return _usuariosMemoria.map((u) {
+        final rol = _buscarRolEnMemoria(u['rol_id'] as String);
+        return {
+          ...u,
+          'rol_codigo': rol?['codigo'],
+          'rol_nombre': rol?['nombre'],
+        };
+      }).toList();
     }
-    return _db!.query('usuarios');
+    return _db!.rawQuery('''
+      SELECT
+        u.id,
+        u.username,
+        u.rol_id,
+        u.nombre,
+        u.contrasenia,
+        u.telefono,
+        u.updated_at,
+        u.sync_status,
+        r.codigo AS rol_codigo,
+        r.nombre AS rol_nombre
+      FROM usuarios u
+      INNER JOIN roles r ON r.id = u.rol_id
+      ORDER BY u.id ASC
+    ''');
   }
 
-  /// Actualiza los datos de un usuario en la tabla `usuarios` usando `whereArgs`.
-  Future<void> actualizarUsuarioCrudo(Map<String, dynamic> datos) async {
+  /// Inserta o actualiza un usuario en `usuarios` validando FK `rol_id`.
+  Future<void> guardarUsuarioCrudo(Map<String, dynamic> datos) async {
     await inicializar();
     final id = datos['id'] as String;
+    final rolId = datos['rol_id'] as String;
+    final fila = {
+      'telefono': '',
+      'updated_at': _ahoraUtcIso(),
+      'sync_status': 'pending',
+      ...datos,
+    };
+
     if (_usarMemoriaFallback) {
+      if (_buscarRolEnMemoria(rolId) == null) {
+        throw StateError('Violación de FK: rol_id "$rolId" no existe.');
+      }
       final indice = _usuariosMemoria.indexWhere((u) => u['id'] == id);
-      if (indice != -1) {
-        _usuariosMemoria[indice] = Map<String, dynamic>.from(datos);
+      if (indice == -1) {
+        _usuariosMemoria.add(Map<String, dynamic>.from(fila));
+      } else {
+        _usuariosMemoria[indice] = Map<String, dynamic>.from(fila);
       }
       return;
     }
-    await _db!.update('usuarios', datos, where: 'id = ?', whereArgs: [id]);
-  }
 
-  /// Obtiene todos los registros crudos de la tabla `obras`.
-  Future<List<Map<String, dynamic>>> obtenerObrasCrudas() async {
-    await inicializar();
-    if (_usarMemoriaFallback) {
-      return List<Map<String, dynamic>>.from(_obrasMemoria);
+    final actualizados = await _db!.update(
+      'usuarios',
+      fila,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    if (actualizados == 0) {
+      await _db!.insert('usuarios', fila);
     }
-    return _db!.query('obras');
   }
 
-  /// Inserta o reemplaza una obra en la tabla `obras`.
-  Future<void> guardarObraCruda(Map<String, dynamic> obraMap) async {
+  /// Actualiza los datos de un usuario existente en la tabla `usuarios`.
+  Future<void> actualizarUsuarioCrudo(Map<String, dynamic> datos) =>
+      guardarUsuarioCrudo(datos);
+
+  /// Obtiene las obras activas (no borradas lógicamente), con soporte opcional
+  /// de filtro por responsable y paginación (`limite`, `desplazamiento`).
+  Future<List<Map<String, dynamic>>> obtenerObrasCrudas({
+    int? limite,
+    int? desplazamiento,
+    String? responsableId,
+  }) async {
     await inicializar();
-    final id = obraMap['id'] as String;
     if (_usarMemoriaFallback) {
+      Iterable<Map<String, dynamic>> filtradas = _obrasMemoria.where(
+        (o) => o['deleted_at'] == null,
+      );
+      if (responsableId != null) {
+        filtradas =
+            filtradas.where((o) => o['responsable_id'] == responsableId);
+      }
+      var lista = filtradas.toList();
+      if (desplazamiento != null && desplazamiento > 0) {
+        lista = desplazamiento >= lista.length
+            ? <Map<String, dynamic>>[]
+            : lista.sublist(desplazamiento);
+      }
+      if (limite != null && limite < lista.length) {
+        lista = lista.sublist(0, limite);
+      }
+
+      return lista.map((obra) {
+        final obraId = obra['id'] as String;
+        final responsable =
+            _buscarUsuarioEnMemoria(obra['responsable_id'] as String);
+        final tareas = _tareasObraMemoria
+            .where((t) => t['obra_id'] == obraId)
+            .toList()
+          ..sort((a, b) => (a['orden'] as int).compareTo(b['orden'] as int));
+        final materiales = _obraMaterialesMemoria
+            .where((m) => m['obra_id'] == obraId)
+            .map((m) => m['nombre'] as String)
+            .toList();
+
+        return {
+          ...obra,
+          'responsable_nombre': responsable?['nombre'] ?? 'Capataz',
+          'tareas': tareas.map(Map<String, dynamic>.from).toList(),
+          'materiales': materiales,
+        };
+      }).toList();
+    }
+
+    final whereClausulas = <String>['o.deleted_at IS NULL'];
+    final args = <Object?>[];
+    if (responsableId != null) {
+      whereClausulas.add('o.responsable_id = ?');
+      args.add(responsableId);
+    }
+
+    final paginacion = StringBuffer();
+    if (limite != null) {
+      paginacion.write(' LIMIT ?');
+      args.add(limite);
+      if (desplazamiento != null) {
+        paginacion.write(' OFFSET ?');
+        args.add(desplazamiento);
+      }
+    }
+
+    final obras = await _db!.rawQuery(
+      '''
+      SELECT
+        o.id,
+        o.nombre,
+        o.estado_semaforo,
+        o.fecha_ultimo_reporte,
+        o.responsable_id,
+        u.nombre AS responsable_nombre,
+        o.ubicacion_latitud,
+        o.ubicacion_longitud,
+        o.ubicacion_direccion,
+        o.observaciones,
+        o.con_foto,
+        o.imagen,
+        o.imagen_url,
+        o.finalizada,
+        o.updated_at,
+        o.sync_status,
+        o.deleted_at
+      FROM obras o
+      INNER JOIN usuarios u ON u.id = o.responsable_id
+      WHERE ${whereClausulas.join(' AND ')}
+      ${paginacion.toString()}
+      ''',
+      args,
+    );
+
+    if (obras.isEmpty) return const [];
+
+    final ids = obras.map((o) => o['id'] as String).toList();
+    final placeholders = List.filled(ids.length, '?').join(', ');
+
+    final tareas = await _db!.query(
+      'tareas_obra',
+      where: 'obra_id IN ($placeholders)',
+      whereArgs: ids,
+      orderBy: 'orden ASC',
+    );
+    final materiales = await _db!.query(
+      'obra_materiales',
+      where: 'obra_id IN ($placeholders)',
+      whereArgs: ids,
+      orderBy: 'id ASC',
+    );
+
+    final tareasPorObra = <String, List<Map<String, dynamic>>>{};
+    for (final tarea in tareas) {
+      final obraId = tarea['obra_id'] as String;
+      tareasPorObra.putIfAbsent(obraId, () => []).add(tarea);
+    }
+
+    final materialesPorObra = <String, List<String>>{};
+    for (final material in materiales) {
+      final obraId = material['obra_id'] as String;
+      materialesPorObra
+          .putIfAbsent(obraId, () => [])
+          .add(material['nombre'] as String);
+    }
+
+    return obras.map((obra) {
+      final obraId = obra['id'] as String;
+      return {
+        ...obra,
+        'tareas': tareasPorObra[obraId] ?? const <Map<String, dynamic>>[],
+        'materiales': materialesPorObra[obraId] ?? const <String>[],
+      };
+    }).toList();
+  }
+
+  /// Inserta o actualiza una obra y sus tablas hijas (`tareas_obra` y
+  /// `obra_materiales`) de forma transaccional sin disparar `ON DELETE CASCADE`.
+  Future<void> guardarObraCruda({
+    required Map<String, dynamic> obra,
+    required List<Map<String, dynamic>> tareas,
+    required List<String> materiales,
+  }) async {
+    await inicializar();
+    final id = obra['id'] as String;
+    final responsableId = obra['responsable_id'] as String;
+    final filaObra = {
+      'updated_at': _ahoraUtcIso(),
+      'sync_status': 'pending',
+      ...obra,
+    };
+
+    if (_usarMemoriaFallback) {
+      if (_buscarUsuarioEnMemoria(responsableId) == null) {
+        throw StateError(
+          'Violación de FK: responsable_id "$responsableId" no existe.',
+        );
+      }
       final indice = _obrasMemoria.indexWhere((o) => o['id'] == id);
       if (indice == -1) {
-        _obrasMemoria.add(Map<String, dynamic>.from(obraMap));
+        _obrasMemoria.add(Map<String, dynamic>.from(filaObra));
       } else {
-        _obrasMemoria[indice] = Map<String, dynamic>.from(obraMap);
+        _obrasMemoria[indice] = Map<String, dynamic>.from(filaObra);
+      }
+      _tareasObraMemoria.removeWhere((t) => t['obra_id'] == id);
+      _tareasObraMemoria.addAll(tareas.map(Map<String, dynamic>.from));
+      _obraMaterialesMemoria.removeWhere((m) => m['obra_id'] == id);
+      for (final nombreMaterial in materiales) {
+        _obraMaterialesMemoria.add({'obra_id': id, 'nombre': nombreMaterial});
       }
       return;
     }
-    await _db!.insert(
-      'obras',
-      obraMap,
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
-  }
 
-  /// Obtiene todos los registros de la tabla `reportes_diarios` ordenados del
-  /// más reciente al más antiguo.
-  Future<List<Map<String, dynamic>>> obtenerReportesCrudos() async {
-    await inicializar();
-    if (_usarMemoriaFallback) {
-      final copia = List<Map<String, dynamic>>.from(_reportesMemoria);
-      copia.sort(
-        (a, b) => (b['fecha_creacion_local'] as String)
-            .compareTo(a['fecha_creacion_local'] as String),
+    await _db!.transaction((txn) async {
+      final actualizados = await txn.update(
+        'obras',
+        filaObra,
+        where: 'id = ?',
+        whereArgs: [id],
       );
-      return copia;
+      if (actualizados == 0) {
+        await txn.insert('obras', filaObra);
+      }
+
+      await txn.delete('tareas_obra', where: 'obra_id = ?', whereArgs: [id]);
+      for (final tarea in tareas) {
+        await txn.insert('tareas_obra', tarea);
+      }
+
+      await txn.delete(
+        'obra_materiales',
+        where: 'obra_id = ?',
+        whereArgs: [id],
+      );
+      for (final nombreMaterial in materiales) {
+        await txn.insert('obra_materiales', {
+          'obra_id': id,
+          'nombre': nombreMaterial,
+        });
+      }
+    });
+  }
+
+  /// Actualiza únicamente el semáforo y la fecha del último reporte de una obra
+  /// sin reescribir `tareas_obra` ni `obra_materiales`.
+  Future<void> actualizarSemaforoObraCruda({
+    required String obraId,
+    required String estadoSemaforo,
+    required DateTime fechaUltimoReporteUtc,
+    required DateTime updatedAtUtc,
+  }) async {
+    await inicializar();
+    final valores = {
+      'estado_semaforo': estadoSemaforo,
+      'fecha_ultimo_reporte': fechaUltimoReporteUtc.toUtc().toIso8601String(),
+      'updated_at': updatedAtUtc.toUtc().toIso8601String(),
+      'sync_status': 'pending',
+    };
+    if (_usarMemoriaFallback) {
+      final idx = _obrasMemoria.indexWhere((o) => o['id'] == obraId);
+      if (idx != -1) {
+        _obrasMemoria[idx] = {..._obrasMemoria[idx], ...valores};
+      }
+      return;
     }
-    return _db!.query(
-      'reportes_diarios',
-      orderBy: 'fecha_creacion_local DESC',
+    await _db!.update('obras', valores, where: 'id = ?', whereArgs: [obraId]);
+  }
+
+  /// Inserta una sola tarea en `tareas_obra` sin reescribir la obra entera.
+  Future<void> insertarTareaCruda(Map<String, dynamic> tarea) async {
+    await inicializar();
+    final obraId = tarea['obra_id'] as String;
+    final fila = {
+      'updated_at': _ahoraUtcIso(),
+      'sync_status': 'pending',
+      ...tarea,
+    };
+    if (_usarMemoriaFallback) {
+      if (_buscarObraEnMemoria(obraId) == null) {
+        throw StateError('Violación de FK: obra_id "$obraId" no existe.');
+      }
+      final idx = _tareasObraMemoria.indexWhere((t) => t['id'] == fila['id']);
+      if (idx == -1) {
+        _tareasObraMemoria.add(Map<String, dynamic>.from(fila));
+      } else {
+        _tareasObraMemoria[idx] = Map<String, dynamic>.from(fila);
+      }
+      return;
+    }
+    final actualizados = await _db!.update(
+      'tareas_obra',
+      fila,
+      where: 'id = ?',
+      whereArgs: [fila['id']],
+    );
+    if (actualizados == 0) {
+      await _db!.insert('tareas_obra', fila);
+    }
+  }
+
+  /// Actualiza atómicamente el estado de completitud de una sola tarea.
+  Future<void> actualizarEstadoTareaCruda({
+    required String tareaId,
+    required bool completada,
+    required DateTime updatedAtUtc,
+  }) async {
+    await inicializar();
+    final valores = {
+      'completada': completada ? 1 : 0,
+      'updated_at': updatedAtUtc.toUtc().toIso8601String(),
+      'sync_status': 'pending',
+    };
+    if (_usarMemoriaFallback) {
+      final idx = _tareasObraMemoria.indexWhere((t) => t['id'] == tareaId);
+      if (idx != -1) {
+        _tareasObraMemoria[idx] = {..._tareasObraMemoria[idx], ...valores};
+      }
+      return;
+    }
+    await _db!.update(
+      'tareas_obra',
+      valores,
+      where: 'id = ?',
+      whereArgs: [tareaId],
     );
   }
 
-  /// Inserta o actualiza un reporte diario en `reportes_diarios`.
-  Future<void> guardarReporteCrudo(Map<String, dynamic> reporteMap) async {
+  /// Obtiene reportes diarios filtrados opcionalmente por [obraId] y paginados.
+  Future<List<Map<String, dynamic>>> obtenerReportesCrudos({
+    String? obraId,
+    int? limite,
+    int? desplazamiento,
+  }) async {
     await inicializar();
-    final id = reporteMap['id'] as String;
     if (_usarMemoriaFallback) {
+      var lista = _reportesMemoria
+          .where((r) => obraId == null || r['obra_id'] == obraId)
+          .map(Map<String, dynamic>.from)
+          .toList()
+        ..sort(
+          (a, b) => (b['fecha_creacion_local'] as String)
+              .compareTo(a['fecha_creacion_local'] as String),
+        );
+      if (desplazamiento != null && desplazamiento > 0) {
+        lista = desplazamiento >= lista.length
+            ? <Map<String, dynamic>>[]
+            : lista.sublist(desplazamiento);
+      }
+      if (limite != null && limite < lista.length) {
+        lista = lista.sublist(0, limite);
+      }
+
+      return lista.map((reporte) {
+        final reporteId = reporte['id'] as String;
+        final obra = _buscarObraEnMemoria(reporte['obra_id'] as String);
+        final autor = _buscarUsuarioEnMemoria(reporte['autor_id'] as String);
+        final materiales = _reporteMaterialesMemoria
+            .where((m) => m['reporte_id'] == reporteId)
+            .map((m) => m['nombre'] as String)
+            .toList();
+        final fotos = _reporteFotosMemoria
+            .where((f) => f['reporte_id'] == reporteId)
+            .map(Map<String, dynamic>.from)
+            .toList();
+
+        return {
+          ...reporte,
+          'obra_nombre': obra?['nombre'] ?? '',
+          'autor_nombre': autor?['nombre'] ?? 'Capataz',
+          'materiales': materiales,
+          'fotos': fotos,
+        };
+      }).toList();
+    }
+
+    final args = <Object?>[];
+    final whereSql = obraId != null ? 'WHERE r.obra_id = ?' : '';
+    if (obraId != null) args.add(obraId);
+
+    final paginacion = StringBuffer();
+    if (limite != null) {
+      paginacion.write(' LIMIT ?');
+      args.add(limite);
+      if (desplazamiento != null) {
+        paginacion.write(' OFFSET ?');
+        args.add(desplazamiento);
+      }
+    }
+
+    final reportes = await _db!.rawQuery(
+      '''
+      SELECT
+        r.id,
+        r.obra_id,
+        o.nombre AS obra_nombre,
+        r.autor_id,
+        u.nombre AS autor_nombre,
+        r.fecha_creacion_local,
+        r.fecha_sincronizacion,
+        r.tarea_seleccionada,
+        r.tarea_completada,
+        r.observaciones,
+        r.estado_semaforo,
+        r.sync_status,
+        r.obra_finalizada,
+        r.updated_at
+      FROM reportes_diarios r
+      INNER JOIN obras o ON o.id = r.obra_id
+      INNER JOIN usuarios u ON u.id = r.autor_id
+      $whereSql
+      ORDER BY r.fecha_creacion_local DESC
+      ${paginacion.toString()}
+      ''',
+      args,
+    );
+
+    if (reportes.isEmpty) return const [];
+
+    final ids = reportes.map((r) => r['id'] as String).toList();
+    final placeholders = List.filled(ids.length, '?').join(', ');
+
+    final materiales = await _db!.query(
+      'reporte_materiales',
+      where: 'reporte_id IN ($placeholders)',
+      whereArgs: ids,
+      orderBy: 'id ASC',
+    );
+    final fotos = await _db!.query(
+      'reporte_fotos',
+      where: 'reporte_id IN ($placeholders)',
+      whereArgs: ids,
+      orderBy: 'id ASC',
+    );
+
+    final materialesPorReporte = <String, List<String>>{};
+    for (final material in materiales) {
+      final reporteId = material['reporte_id'] as String;
+      materialesPorReporte
+          .putIfAbsent(reporteId, () => [])
+          .add(material['nombre'] as String);
+    }
+
+    final fotosPorReporte = <String, List<Map<String, dynamic>>>{};
+    for (final foto in fotos) {
+      final reporteId = foto['reporte_id'] as String;
+      fotosPorReporte.putIfAbsent(reporteId, () => []).add(foto);
+    }
+
+    return reportes.map((reporte) {
+      final reporteId = reporte['id'] as String;
+      return {
+        ...reporte,
+        'materiales': materialesPorReporte[reporteId] ?? const <String>[],
+        'fotos': fotosPorReporte[reporteId] ?? const <Map<String, dynamic>>[],
+      };
+    }).toList();
+  }
+
+  /// Obtiene el historial de reportes diarios de una obra puntual filtrando
+  /// directamente en SQL.
+  Future<List<Map<String, dynamic>>> obtenerReportesPorObraCrudos(
+    String obraId, {
+    int? limite,
+    int? desplazamiento,
+  }) =>
+      obtenerReportesCrudos(
+        obraId: obraId,
+        limite: limite,
+        desplazamiento: desplazamiento,
+      );
+
+  /// Inserta o actualiza un reporte diario junto con `reporte_materiales` y
+  /// `reporte_fotos` dentro de una transacción.
+  Future<void> guardarReporteCrudo({
+    required Map<String, dynamic> reporte,
+    required List<String> materiales,
+    required List<Map<String, dynamic>> fotos,
+  }) async {
+    await inicializar();
+    final id = reporte['id'] as String;
+    final obraId = reporte['obra_id'] as String;
+    final autorId = reporte['autor_id'] as String;
+    final filaReporte = {
+      'updated_at': _ahoraUtcIso(),
+      ...reporte,
+    };
+
+    if (_usarMemoriaFallback) {
+      if (_buscarObraEnMemoria(obraId) == null) {
+        throw StateError('Violación de FK: obra_id "$obraId" no existe.');
+      }
+      if (_buscarUsuarioEnMemoria(autorId) == null) {
+        throw StateError('Violación de FK: autor_id "$autorId" no existe.');
+      }
       final indice = _reportesMemoria.indexWhere((r) => r['id'] == id);
       if (indice == -1) {
-        _reportesMemoria.insert(0, Map<String, dynamic>.from(reporteMap));
+        _reportesMemoria.insert(0, Map<String, dynamic>.from(filaReporte));
       } else {
-        _reportesMemoria[indice] = Map<String, dynamic>.from(reporteMap);
+        _reportesMemoria[indice] = Map<String, dynamic>.from(filaReporte);
       }
+      _reporteMaterialesMemoria.removeWhere((m) => m['reporte_id'] == id);
+      for (final nombreMaterial in materiales) {
+        _reporteMaterialesMemoria.add({
+          'reporte_id': id,
+          'nombre': nombreMaterial,
+        });
+      }
+      _reporteFotosMemoria.removeWhere((f) => f['reporte_id'] == id);
+      _reporteFotosMemoria.addAll(fotos.map(Map<String, dynamic>.from));
       return;
     }
-    await _db!.insert(
-      'reportes_diarios',
-      reporteMap,
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+
+    await _db!.transaction((txn) async {
+      final actualizados = await txn.update(
+        'reportes_diarios',
+        filaReporte,
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      if (actualizados == 0) {
+        await txn.insert('reportes_diarios', filaReporte);
+      }
+
+      await txn.delete(
+        'reporte_materiales',
+        where: 'reporte_id = ?',
+        whereArgs: [id],
+      );
+      for (final nombreMaterial in materiales) {
+        await txn.insert('reporte_materiales', {
+          'reporte_id': id,
+          'nombre': nombreMaterial,
+        });
+      }
+
+      await txn.delete(
+        'reporte_fotos',
+        where: 'reporte_id = ?',
+        whereArgs: [id],
+      );
+      for (final foto in fotos) {
+        await txn.insert('reporte_fotos', foto);
+      }
+    });
   }
 
   /// Marca todos los reportes con `sync_status = 'pending'` como `'synced'`.
   Future<int> marcarReportesComoSincronizados(DateTime fechaSync) async {
     await inicializar();
-    final isoFecha = fechaSync.toIso8601String();
+    final isoFecha = fechaSync.toUtc().toIso8601String();
     if (_usarMemoriaFallback) {
       var actualizados = 0;
       for (var i = 0; i < _reportesMemoria.length; i++) {
@@ -284,32 +1127,341 @@ class BaseDatosLocalService {
     );
   }
 
+  /// Devuelve todas las filas pendientes (`sync_status = 'pending'`) de una
+  /// tabla específica para el motor de sincronización Push.
+  Future<List<Map<String, dynamic>>> obtenerPendientesDeTabla(
+    String tabla,
+  ) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      final origen = _listaMemoriaPorTabla(tabla);
+      return origen
+          .where((fila) => fila['sync_status'] == 'pending')
+          .map(Map<String, dynamic>.from)
+          .toList();
+    }
+    return _db!.query(
+      tabla,
+      where: 'sync_status = ?',
+      whereArgs: ['pending'],
+    );
+  }
+
+  /// Devuelve los materiales asociados a una obra (para Push remoto).
+  Future<List<String>> obtenerMaterialesDeObra(String obraId) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      return _obraMaterialesMemoria
+          .where((m) => m['obra_id'] == obraId)
+          .map((m) => m['nombre'] as String)
+          .toList();
+    }
+    final filas = await _db!.query(
+      'obra_materiales',
+      where: 'obra_id = ?',
+      whereArgs: [obraId],
+      orderBy: 'id ASC',
+    );
+    return filas.map((f) => f['nombre'] as String).toList();
+  }
+
+  /// Devuelve los materiales consumidos de un reporte (para Push remoto).
+  Future<List<String>> obtenerMaterialesDeReporte(String reporteId) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      return _reporteMaterialesMemoria
+          .where((m) => m['reporte_id'] == reporteId)
+          .map((m) => m['nombre'] as String)
+          .toList();
+    }
+    final filas = await _db!.query(
+      'reporte_materiales',
+      where: 'reporte_id = ?',
+      whereArgs: [reporteId],
+      orderBy: 'id ASC',
+    );
+    return filas.map((f) => f['nombre'] as String).toList();
+  }
+
+  /// Devuelve las fotos asociadas a un reporte (para Push a Storage).
+  Future<List<Map<String, dynamic>>> obtenerFotosDeReporte(
+    String reporteId,
+  ) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      return _reporteFotosMemoria
+          .where((f) => f['reporte_id'] == reporteId)
+          .map(Map<String, dynamic>.from)
+          .toList();
+    }
+    return _db!.query(
+      'reporte_fotos',
+      where: 'reporte_id = ?',
+      whereArgs: [reporteId],
+      orderBy: 'id ASC',
+    );
+  }
+
+  /// Actualiza la URL remota y el estado de subida de una fotografía tras
+  /// confirmarse su carga en Storage.
+  Future<void> actualizarFotoSincronizada({
+    required String reporteId,
+    required String rutaLocal,
+    required String urlRemota,
+  }) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      for (var i = 0; i < _reporteFotosMemoria.length; i++) {
+        final f = _reporteFotosMemoria[i];
+        if (f['reporte_id'] == reporteId && f['ruta_local'] == rutaLocal) {
+          _reporteFotosMemoria[i] = {
+            ...f,
+            'url_remota': urlRemota,
+            'estado_subida': 'synced',
+          };
+        }
+      }
+      return;
+    }
+    await _db!.update(
+      'reporte_fotos',
+      {'url_remota': urlRemota, 'estado_subida': 'synced'},
+      where: 'reporte_id = ? AND ruta_local = ?',
+      whereArgs: [reporteId, rutaLocal],
+    );
+  }
+
+  /// Marca una fila concreta de [tabla] como `synced` tras confirmación remota.
+  Future<void> marcarEntidadSincronizada({
+    required String tabla,
+    required String id,
+    DateTime? fechaSyncUtc,
+  }) async {
+    await inicializar();
+    final valores = <String, dynamic>{'sync_status': 'synced'};
+    if (tabla == 'reportes_diarios' && fechaSyncUtc != null) {
+      valores['fecha_sincronizacion'] = fechaSyncUtc.toUtc().toIso8601String();
+    }
+
+    if (_usarMemoriaFallback) {
+      final lista = _listaMemoriaPorTabla(tabla);
+      final idx = lista.indexWhere((e) => e['id'] == id);
+      if (idx != -1) {
+        lista[idx] = {...lista[idx], ...valores};
+      }
+      return;
+    }
+    await _db!.update(tabla, valores, where: 'id = ?', whereArgs: [id]);
+  }
+
+  /// Verifica si un registro local está actualmente en estado `pending`.
+  /// Usado en Pull para aplicar *local-pending wins*.
+  Future<bool> estaPendienteLocal({
+    required String tabla,
+    required String id,
+  }) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      final lista = _listaMemoriaPorTabla(tabla);
+      for (final fila in lista) {
+        if (fila['id'] == id) return fila['sync_status'] == 'pending';
+      }
+      return false;
+    }
+    final filas = await _db!.query(
+      tabla,
+      columns: ['sync_status'],
+      where: 'id = ?',
+      whereArgs: [id],
+      limit: 1,
+    );
+    if (filas.isEmpty) return false;
+    return filas.first['sync_status'] == 'pending';
+  }
+
+  /// Registra o incrementa un fallo de sincronización en `cola_sincronizacion`.
+  Future<void> registrarFalloSincronizacion({
+    required String entidad,
+    required String entidadId,
+    required String operacion,
+    required String error,
+  }) async {
+    await inicializar();
+    final clave = '${entidad}_$entidadId';
+    final ahora = _ahoraUtcIso();
+    if (_usarMemoriaFallback) {
+      final idx = _colaSyncMemoria.indexWhere((c) => c['id'] == clave);
+      if (idx == -1) {
+        _colaSyncMemoria.add({
+          'id': clave,
+          'entidad': entidad,
+          'entidad_id': entidadId,
+          'operacion': operacion,
+          'reintentos': 1,
+          'ultimo_error': error,
+          'creado_en': ahora,
+        });
+      } else {
+        final actual = _colaSyncMemoria[idx];
+        _colaSyncMemoria[idx] = {
+          ...actual,
+          'reintentos': (actual['reintentos'] as int? ?? 0) + 1,
+          'ultimo_error': error,
+        };
+      }
+      return;
+    }
+
+    final existentes = await _db!.query(
+      'cola_sincronizacion',
+      where: 'id = ?',
+      whereArgs: [clave],
+      limit: 1,
+    );
+    if (existentes.isEmpty) {
+      await _db!.insert('cola_sincronizacion', {
+        'id': clave,
+        'entidad': entidad,
+        'entidad_id': entidadId,
+        'operacion': operacion,
+        'reintentos': 1,
+        'ultimo_error': error,
+        'creado_en': ahora,
+      });
+    } else {
+      final reintentos = (existentes.first['reintentos'] as int? ?? 0) + 1;
+      await _db!.update(
+        'cola_sincronizacion',
+        {'reintentos': reintentos, 'ultimo_error': error},
+        where: 'id = ?',
+        whereArgs: [clave],
+      );
+    }
+  }
+
+  /// Elimina una entrada de error de `cola_sincronizacion` cuando tiene éxito.
+  Future<void> limpiarFalloSincronizacion({
+    required String entidad,
+    required String entidadId,
+  }) async {
+    await inicializar();
+    final clave = '${entidad}_$entidadId';
+    if (_usarMemoriaFallback) {
+      _colaSyncMemoria.removeWhere((c) => c['id'] == clave);
+      return;
+    }
+    await _db!.delete(
+      'cola_sincronizacion',
+      where: 'id = ?',
+      whereArgs: [clave],
+    );
+  }
+
+  /// Devuelve el detalle actual de elementos con reintentos en `cola_sincronizacion`.
+  Future<List<Map<String, dynamic>>> obtenerFallosSincronizacion() async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      return _colaSyncMemoria.map(Map<String, dynamic>.from).toList();
+    }
+    return _db!.query('cola_sincronizacion', orderBy: 'creado_en ASC');
+  }
+
+  /// Devuelve la marca de tiempo UTC de la última sincronización exitosa.
+  Future<DateTime?> obtenerUltimaSyncUtc() async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      return _ultimaSyncUtcMemoria != null
+          ? DateTime.parse(_ultimaSyncUtcMemoria!)
+          : null;
+    }
+    final filas = await _db!.query('estado_sincronizacion', limit: 1);
+    if (filas.isEmpty) return null;
+    final raw = filas.first['ultima_sync_utc'] as String?;
+    return raw != null ? DateTime.parse(raw) : null;
+  }
+
+  /// Persiste la marca de tiempo UTC de la última sincronización exitosa.
+  Future<void> guardarUltimaSyncUtc(DateTime fechaUtc) async {
+    await inicializar();
+    final iso = fechaUtc.toUtc().toIso8601String();
+    if (_usarMemoriaFallback) {
+      _ultimaSyncUtcMemoria = iso;
+      return;
+    }
+    final actualizados = await _db!.update(
+      'estado_sincronizacion',
+      {'ultima_sync_utc': iso},
+      where: 'id = ?',
+      whereArgs: [1],
+    );
+    if (actualizados == 0) {
+      await _db!.insert('estado_sincronizacion', {
+        'id': 1,
+        'ultima_sync_utc': iso,
+      });
+    }
+  }
+
   /// Obtiene el historial de notificaciones emitidas.
   Future<List<Map<String, dynamic>>> obtenerNotificacionesCrudas() async {
     await inicializar();
     if (_usarMemoriaFallback) {
-      final copia = List<Map<String, dynamic>>.from(_notificacionesMemoria);
-      copia.sort(
-        (a, b) =>
-            (b['fecha_hora'] as String).compareTo(a['fecha_hora'] as String),
-      );
+      final copia = List<Map<String, dynamic>>.from(_notificacionesMemoria)
+        ..sort(
+          (a, b) =>
+              (b['fecha_hora'] as String).compareTo(a['fecha_hora'] as String),
+        );
       return copia;
     }
     return _db!.query('notificaciones', orderBy: 'fecha_hora DESC');
   }
 
-  /// Registra una nueva notificación en la base local.
+  /// Registra una nueva notificación en la base local respetando FK `obra_id`.
   Future<void> guardarNotificacionCruda(Map<String, dynamic> notifMap) async {
     await inicializar();
+    final id = notifMap['id'] as String;
+    final obraId = notifMap['obra_id'] as String?;
+    final datosNormalizados = <String, dynamic>{
+      'updated_at': _ahoraUtcIso(),
+      'sync_status': 'pending',
+      ...notifMap,
+    };
+
     if (_usarMemoriaFallback) {
-      _notificacionesMemoria.insert(0, Map<String, dynamic>.from(notifMap));
+      if (obraId != null && _buscarObraEnMemoria(obraId) == null) {
+        datosNormalizados['obra_id'] = null;
+      }
+      final indice = _notificacionesMemoria.indexWhere((n) => n['id'] == id);
+      if (indice == -1) {
+        _notificacionesMemoria.insert(0, datosNormalizados);
+      } else {
+        _notificacionesMemoria[indice] = datosNormalizados;
+      }
       return;
     }
-    await _db!.insert(
+
+    if (obraId != null) {
+      final existe = await _db!.query(
+        'obras',
+        columns: ['id'],
+        where: 'id = ?',
+        whereArgs: [obraId],
+        limit: 1,
+      );
+      if (existe.isEmpty) {
+        datosNormalizados['obra_id'] = null;
+      }
+    }
+
+    final actualizados = await _db!.update(
       'notificaciones',
-      notifMap,
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      datosNormalizados,
+      where: 'id = ?',
+      whereArgs: [id],
     );
+    if (actualizados == 0) {
+      await _db!.insert('notificaciones', datosNormalizados);
+    }
   }
 
   /// Obtiene la configuración del recordatorio diario de sincronización.
@@ -320,7 +1472,7 @@ class BaseDatosLocalService {
     }
     final filas = await _db!.query('configuracion_recordatorio', limit: 1);
     if (filas.isEmpty) {
-      return {'activo': 1, 'hora': 18, 'minuto': 0};
+      return {'id': 1, 'activo': 1, 'hora': 18, 'minuto': 0};
     }
     return filas.first;
   }
@@ -342,419 +1494,426 @@ class BaseDatosLocalService {
       _configRecordatorioMemoria = valores;
       return;
     }
-    await _db!.insert(
+    final actualizados = await _db!.update(
       'configuracion_recordatorio',
       valores,
-      conflictAlgorithm: ConflictAlgorithm.replace,
+      where: 'id = ?',
+      whereArgs: [1],
     );
+    if (actualizados == 0) {
+      await _db!.insert('configuracion_recordatorio', valores);
+    }
   }
 
-  /// Cierra la conexión SQLite cuando ya no se utiliza
+  /// Cierra la conexión SQLite cuando ya no se utiliza.
   Future<void> cerrar() async {
     await _db?.close();
     _db = null;
     _inicializado = false;
   }
 
-  /// 3 usuarios de prueba en la base de datos local con cada rol requerido.
-  List<Map<String, dynamic>> _semillasUsuarios() => [
+  List<Map<String, dynamic>> _listaMemoriaPorTabla(String tabla) =>
+      switch (tabla) {
+        'usuarios' => _usuariosMemoria,
+        'obras' => _obrasMemoria,
+        'tareas_obra' => _tareasObraMemoria,
+        'reportes_diarios' => _reportesMemoria,
+        'notificaciones' => _notificacionesMemoria,
+        _ => throw ArgumentError('Tabla no soportada para sync: $tabla'),
+      };
+
+  Map<String, dynamic>? _buscarRolEnMemoria(String id) {
+    for (final rol in _rolesMemoria) {
+      if (rol['id'] == id) return rol;
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _buscarUsuarioEnMemoria(String id) {
+    for (final usuario in _usuariosMemoria) {
+      if (usuario['id'] == id) return usuario;
+    }
+    return null;
+  }
+
+  Map<String, dynamic>? _buscarObraEnMemoria(String id) {
+    for (final obra in _obrasMemoria) {
+      if (obra['id'] == id) return obra;
+    }
+    return null;
+  }
+
+  /// Catálogo inicial con los 3 roles operativos del proyecto.
+  List<Map<String, dynamic>> _semillasRoles() => [
         {
-          'id': 'u_ingeniero',
-          'username': 'ingeniero',
-          'rol': 'ingeniero',
-          'nombre': 'Ing. Braulio Hormigón',
-          'contrasenia': '1234',
-          'telefono': '+54 9 261 555-0101',
+          'id': 'rol_ingeniero',
+          'codigo': 'ingeniero',
+          'nombre': 'Ingeniero Jefe de Obra',
         },
         {
-          'id': 'u_capataz',
-          'username': 'capataz',
-          'rol': 'capataz',
-          'nombre': 'Carlos Méndez (Capataz)',
-          'contrasenia': '1234',
-          'telefono': '+54 9 261 555-0102',
+          'id': 'rol_capataz',
+          'codigo': 'capataz',
+          'nombre': 'Capataz de Obra',
         },
         {
-          'id': 'u_duenio',
-          'username': 'dueno',
-          'rol': 'duenio',
-          'nombre': 'Roberto Del Sur (Dueño)',
-          'contrasenia': '1234',
-          'telefono': '+54 9 261 555-0100',
+          'id': 'rol_duenio',
+          'codigo': 'duenio',
+          'nombre': 'Dueño / Gerencia',
         },
       ];
 
-  /// Las 6 obras activas iniciales con tareas, materiales, responsable y ubicación.
+  /// 3 usuarios de prueba vinculados con `roles` (1:N) incluyendo `telefono`.
+  List<Map<String, dynamic>> _semillasUsuarios() {
+    final ts = DateTime.utc(2026, 9, 18).toIso8601String();
+    return [
+      {
+        'id': 'u_ingeniero',
+        'username': 'ingeniero',
+        'rol_id': 'rol_ingeniero',
+        'nombre': 'Ing. Braulio Hormigón',
+        'contrasenia': '1234',
+        'telefono': '+54 9 261 555-0101',
+        'updated_at': ts,
+        'sync_status': 'synced',
+      },
+      {
+        'id': 'u_capataz',
+        'username': 'capataz',
+        'rol_id': 'rol_capataz',
+        'nombre': 'Carlos Méndez (Capataz)',
+        'contrasenia': '1234',
+        'telefono': '+54 9 261 555-0102',
+        'updated_at': ts,
+        'sync_status': 'synced',
+      },
+      {
+        'id': 'u_duenio',
+        'username': 'dueno',
+        'rol_id': 'rol_duenio',
+        'nombre': 'Roberto Del Sur (Dueño)',
+        'contrasenia': '1234',
+        'telefono': '+54 9 261 555-0100',
+        'updated_at': ts,
+        'sync_status': 'synced',
+      },
+    ];
+  }
+
+  /// Las 6 obras activas iniciales con ubicación atómica y FK a `usuarios`.
   List<Map<String, dynamic>> _semillasObras() => [
         {
           'id': '1',
           'nombre': 'Torre Residencial Las Heras',
           'estado_semaforo': 'problemas',
           'fecha_ultimo_reporte':
-              DateTime(2026, 9, 18, 16, 30).toIso8601String(),
+              DateTime.utc(2026, 9, 18, 16, 30).toIso8601String(),
           'responsable_id': 'u_capataz',
-          'responsable_nombre': 'Carlos Méndez (Capataz)',
-          'tareas': jsonEncode([
-            {
-              'id': 't1_1',
-              'nombre': 'Replanteo y excavación de bases',
-              'completada': true,
-            },
-            {
-              'id': 't1_2',
-              'nombre': 'Losa de planta alta',
-              'completada': false,
-            },
-            {
-              'id': 't1_3',
-              'nombre': 'Columnas de hormigón piso 2',
-              'completada': false,
-            },
-          ]),
-          'materiales': jsonEncode([
-            'Hormigón H-21',
-            'Hierro nervado 12mm',
-            'Alambre negro recocido',
-            'Madera para encofrado',
-          ]),
-          'ubicacion': jsonEncode({
-            'latitud': -32.8489,
-            'longitud': -68.8392,
-            'direccion': 'Av. San Martín 1450, Las Heras, Mendoza',
-          }),
+          'ubicacion_latitud': -32.8489,
+          'ubicacion_longitud': -68.8392,
+          'ubicacion_direccion': 'Av. San Martín 1450, Las Heras, Mendoza',
           'observaciones':
               'Faltó hormigón el martes. Proveedor reprogramó entrega.',
           'con_foto': 1,
           'imagen': 'assets/images/obra1.png',
+          'imagen_url': null,
           'finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 18, 16, 30).toIso8601String(),
+          'sync_status': 'synced',
+          'deleted_at': null,
         },
         {
           'id': '2',
           'nombre': 'Complejo Comercial Belgrano',
           'estado_semaforo': 'aTiempo',
           'fecha_ultimo_reporte':
-              DateTime(2026, 9, 18, 17, 15).toIso8601String(),
+              DateTime.utc(2026, 9, 18, 17, 15).toIso8601String(),
           'responsable_id': 'u_capataz',
-          'responsable_nombre': 'Carlos Méndez (Capataz)',
-          'tareas': jsonEncode([
-            {
-              'id': 't2_1',
-              'nombre': 'Fundaciones y encadenado inferior',
-              'completada': true,
-            },
-            {'id': 't2_2', 'nombre': 'Mampostería piso 1', 'completada': true},
-            {
-              'id': 't2_3',
-              'nombre': 'Revocado grueso interior',
-              'completada': true,
-            },
-            {'id': 't2_4', 'nombre': 'Mampostería piso 2', 'completada': true},
-            {
-              'id': 't2_5',
-              'nombre': 'Colocación de aberturas de aluminio',
-              'completada': false,
-            },
-          ]),
-          'materiales': jsonEncode([
-            'Ladrillón cerámico 18x18x33',
-            'Cemento Portland',
-            'Cal hidráulica',
-            'Arena gruesa',
-          ]),
-          'ubicacion': jsonEncode({
-            'latitud': -32.8895,
-            'longitud': -68.8458,
-            'direccion': 'Av. Belgrano 820, Ciudad de Mendoza',
-          }),
+          'ubicacion_latitud': -32.8895,
+          'ubicacion_longitud': -68.8458,
+          'ubicacion_direccion': 'Av. Belgrano 820, Ciudad de Mendoza',
           'observaciones':
               'Sin novedades. Cuadrilla trabajando a ritmo completo.',
           'con_foto': 1,
           'imagen': 'assets/images/obra2.png',
+          'imagen_url': null,
           'finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 18, 17, 15).toIso8601String(),
+          'sync_status': 'synced',
+          'deleted_at': null,
         },
         {
           'id': '3',
           'nombre': 'Nave Industrial Parque Sur',
           'estado_semaforo': 'demorada',
           'fecha_ultimo_reporte':
-              DateTime(2026, 9, 17, 18, 0).toIso8601String(),
+              DateTime.utc(2026, 9, 17, 18, 0).toIso8601String(),
           'responsable_id': 'u_capataz',
-          'responsable_nombre': 'Carlos Méndez (Capataz)',
-          'tareas': jsonEncode([
-            {
-              'id': 't3_1',
-              'nombre': 'Nivelación y compactación de suelo',
-              'completada': true,
-            },
-            {
-              'id': 't3_2',
-              'nombre': 'Montaje de cabreadas metálicas',
-              'completada': true,
-            },
-            {
-              'id': 't3_3',
-              'nombre': 'Instalación eléctrica trifásica',
-              'completada': false,
-            },
-            {
-              'id': 't3_4',
-              'nombre': 'Piso industrial alisado',
-              'completada': false,
-            },
-          ]),
-          'materiales': jsonEncode([
-            'Cable subterráneo 4x16mm',
-            'Bandejas portacables galvanizadas',
-            'Tablero estanco IP65',
-            'Jabalina de puesta a tierra',
-          ]),
-          'ubicacion': jsonEncode({
-            'latitud': -32.9254,
-            'longitud': -68.8130,
-            'direccion': 'Carril Rodríguez Peña 2300, Godoy Cruz, Mendoza',
-          }),
+          'ubicacion_latitud': -32.9254,
+          'ubicacion_longitud': -68.8130,
+          'ubicacion_direccion':
+              'Carril Rodríguez Peña 2300, Godoy Cruz, Mendoza',
           'observaciones': 'Lluvia, se perdieron dos días en tendido exterior.',
           'con_foto': 0,
           'imagen': 'assets/images/obra3.png',
+          'imagen_url': null,
           'finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 17, 18, 0).toIso8601String(),
+          'sync_status': 'synced',
+          'deleted_at': null,
         },
         {
           'id': '4',
           'nombre': 'Edificio Mirador del Parque',
           'estado_semaforo': 'demorada',
           'fecha_ultimo_reporte':
-              DateTime(2026, 9, 17, 15, 20).toIso8601String(),
+              DateTime.utc(2026, 9, 17, 15, 20).toIso8601String(),
           'responsable_id': 'u_capataz',
-          'responsable_nombre': 'Carlos Méndez (Capataz)',
-          'tareas': jsonEncode([
-            {
-              'id': 't4_1',
-              'nombre': 'Vallado perimetral reglamentario',
-              'completada': true,
-            },
-            {
-              'id': 't4_2',
-              'nombre': 'Andamios fachada principal',
-              'completada': false,
-            },
-            {
-              'id': 't4_3',
-              'nombre': 'Revestimiento texturado exterior',
-              'completada': false,
-            },
-          ]),
-          'materiales': jsonEncode([
-            'Cuerpos de andamio tubular',
-            'Tablones metálicos antideslizantes',
-            'Revestimiento plástico texturado',
-            'Malla de fibra de vidrio',
-          ]),
-          'ubicacion': jsonEncode({
-            'latitud': -32.8930,
-            'longitud': -68.8615,
-            'direccion': 'Av. Emilio Civit 410, Ciudad de Mendoza',
-          }),
+          'ubicacion_latitud': -32.8930,
+          'ubicacion_longitud': -68.8615,
+          'ubicacion_direccion': 'Av. Emilio Civit 410, Ciudad de Mendoza',
           'observaciones':
               'Esperando habilitación municipal para corte parcial de vereda.',
           'con_foto': 0,
           'imagen': 'assets/images/obra4.png',
+          'imagen_url': null,
           'finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 17, 15, 20).toIso8601String(),
+          'sync_status': 'synced',
+          'deleted_at': null,
         },
         {
           'id': '5',
           'nombre': 'Barrio Privado Los Olivos',
           'estado_semaforo': 'aTiempo',
           'fecha_ultimo_reporte':
-              DateTime(2026, 9, 18, 14, 10).toIso8601String(),
+              DateTime.utc(2026, 9, 18, 14, 10).toIso8601String(),
           'responsable_id': 'u_ingeniero',
-          'responsable_nombre': 'Ing. Braulio Hormigón',
-          'tareas': jsonEncode([
-            {
-              'id': 't5_1',
-              'nombre': 'Movimiento de suelo y apertura de calles',
-              'completada': true,
-            },
-            {
-              'id': 't5_2',
-              'nombre': 'Red de agua potable y cloacas',
-              'completada': true,
-            },
-            {
-              'id': 't5_3',
-              'nombre': 'Estructura de hormigón pórtico acceso',
-              'completada': false,
-            },
-          ]),
-          'materiales': jsonEncode([
-            'Hormigón elaborado H-25',
-            'Malla electrosoldada Q188',
-            'Caño PVC 110mm',
-          ]),
-          'ubicacion': jsonEncode({
-            'latitud': -32.9612,
-            'longitud': -68.8540,
-            'direccion': 'Ruta Panamericana Km 12, Luján de Cuyo, Mendoza',
-          }),
+          'ubicacion_latitud': -32.9612,
+          'ubicacion_longitud': -68.8540,
+          'ubicacion_direccion':
+              'Ruta Panamericana Km 12, Luján de Cuyo, Mendoza',
           'observaciones': 'Avance normal según cronograma semanal.',
           'con_foto': 0,
           'imagen': 'assets/images/obra5.png',
+          'imagen_url': null,
           'finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 18, 14, 10).toIso8601String(),
+          'sync_status': 'synced',
+          'deleted_at': null,
         },
         {
           'id': '6',
           'nombre': 'Centro Logístico Ruta 40',
           'estado_semaforo': 'aTiempo',
           'fecha_ultimo_reporte':
-              DateTime(2026, 9, 19, 11, 45).toIso8601String(),
+              DateTime.utc(2026, 9, 19, 11, 45).toIso8601String(),
           'responsable_id': 'u_ingeniero',
-          'responsable_nombre': 'Ing. Braulio Hormigón',
-          'tareas': jsonEncode([
-            {
-              'id': 't6_1',
-              'nombre': 'Platea de fundación sector A',
-              'completada': true,
-            },
-            {
-              'id': 't6_2',
-              'nombre': 'Encofrado de columnas perimetrales',
-              'completada': false,
-            },
-            {
-              'id': 't6_3',
-              'nombre': 'Vigas de encadenado superior',
-              'completada': false,
-            },
-            {
-              'id': 't6_4',
-              'nombre': 'Cubierta metálica parabólica',
-              'completada': false,
-            },
-            {
-              'id': 't6_5',
-              'nombre': 'Dársenas de carga y descarga',
-              'completada': false,
-            },
-          ]),
-          'materiales': jsonEncode([
-            'Fenólico 18mm para encofrado',
-            'Puntales telescópicos metálicos',
-            'Desmoldante líquido',
-            'Hierro 16mm',
-          ]),
-          'ubicacion': jsonEncode({
-            'latitud': -32.8150,
-            'longitud': -68.8210,
-            'direccion': 'Ruta Nacional 40 Km 3295, Las Heras, Mendoza',
-          }),
+          'ubicacion_latitud': -32.8150,
+          'ubicacion_longitud': -68.8210,
+          'ubicacion_direccion': 'Ruta Nacional 40 Km 3295, Las Heras, Mendoza',
           'observaciones': 'Inicio de encofrado en sector norte.',
           'con_foto': 0,
           'imagen': 'assets/images/obra6.png',
+          'imagen_url': null,
           'finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 19, 11, 45).toIso8601String(),
+          'sync_status': 'synced',
+          'deleted_at': null,
         },
       ];
 
-  /// Reportes diarios iniciales para consulta de historial y exportación SIGO.
+  /// Tareas normalizadas en `tareas_obra` (1:N con `obras`).
+  List<Map<String, dynamic>> _semillasTareasObra() {
+    final ts = DateTime.utc(2026, 9, 18).toIso8601String();
+    Map<String, dynamic> tarea(
+      String id,
+      String obraId,
+      String nombre,
+      int completada,
+      int orden,
+    ) =>
+        {
+          'id': id,
+          'obra_id': obraId,
+          'nombre': nombre,
+          'completada': completada,
+          'orden': orden,
+          'updated_at': ts,
+          'sync_status': 'synced',
+        };
+
+    return [
+      tarea('t1_1', '1', 'Replanteo y excavación de bases', 1, 0),
+      tarea('t1_2', '1', 'Losa de planta alta', 0, 1),
+      tarea('t1_3', '1', 'Columnas de hormigón piso 2', 0, 2),
+      tarea('t2_1', '2', 'Fundaciones y encadenado inferior', 1, 0),
+      tarea('t2_2', '2', 'Mampostería piso 1', 1, 1),
+      tarea('t2_3', '2', 'Revocado grueso interior', 1, 2),
+      tarea('t2_4', '2', 'Mampostería piso 2', 1, 3),
+      tarea('t2_5', '2', 'Colocación de aberturas de aluminio', 0, 4),
+      tarea('t3_1', '3', 'Nivelación y compactación de suelo', 1, 0),
+      tarea('t3_2', '3', 'Montaje de cabreadas metálicas', 1, 1),
+      tarea('t3_3', '3', 'Instalación eléctrica trifásica', 0, 2),
+      tarea('t3_4', '3', 'Piso industrial alisado', 0, 3),
+      tarea('t4_1', '4', 'Vallado perimetral reglamentario', 1, 0),
+      tarea('t4_2', '4', 'Andamios fachada principal', 0, 1),
+      tarea('t4_3', '4', 'Revestimiento texturado exterior', 0, 2),
+      tarea('t5_1', '5', 'Movimiento de suelo y apertura de calles', 1, 0),
+      tarea('t5_2', '5', 'Red de agua potable y cloacas', 1, 1),
+      tarea('t5_3', '5', 'Estructura de hormigón pórtico acceso', 0, 2),
+      tarea('t6_1', '6', 'Platea de fundación sector A', 1, 0),
+      tarea('t6_2', '6', 'Encofrado de columnas perimetrales', 0, 1),
+      tarea('t6_3', '6', 'Vigas de encadenado superior', 0, 2),
+      tarea('t6_4', '6', 'Cubierta metálica parabólica', 0, 3),
+      tarea('t6_5', '6', 'Dársenas de carga y descarga', 0, 4),
+    ];
+  }
+
+  /// Materiales asignados a cada obra en `obra_materiales` (1:N con `obras`).
+  List<Map<String, dynamic>> _semillasObraMateriales() => [
+        {'obra_id': '1', 'nombre': 'Hormigón H-21'},
+        {'obra_id': '1', 'nombre': 'Hierro nervado 12mm'},
+        {'obra_id': '1', 'nombre': 'Alambre negro recocido'},
+        {'obra_id': '1', 'nombre': 'Madera para encofrado'},
+        {'obra_id': '2', 'nombre': 'Ladrillón cerámico 18x18x33'},
+        {'obra_id': '2', 'nombre': 'Cemento Portland'},
+        {'obra_id': '2', 'nombre': 'Cal hidráulica'},
+        {'obra_id': '2', 'nombre': 'Arena gruesa'},
+        {'obra_id': '3', 'nombre': 'Cable subterráneo 4x16mm'},
+        {'obra_id': '3', 'nombre': 'Bandejas portacables galvanizadas'},
+        {'obra_id': '3', 'nombre': 'Tablero estanco IP65'},
+        {'obra_id': '3', 'nombre': 'Jabalina de puesta a tierra'},
+        {'obra_id': '4', 'nombre': 'Cuerpos de andamio tubular'},
+        {'obra_id': '4', 'nombre': 'Tablones metálicos antideslizantes'},
+        {'obra_id': '4', 'nombre': 'Revestimiento plástico texturado'},
+        {'obra_id': '4', 'nombre': 'Malla de fibra de vidrio'},
+        {'obra_id': '5', 'nombre': 'Hormigón elaborado H-25'},
+        {'obra_id': '5', 'nombre': 'Malla electrosoldada Q188'},
+        {'obra_id': '5', 'nombre': 'Caño PVC 110mm'},
+        {'obra_id': '6', 'nombre': 'Fenólico 18mm para encofrado'},
+        {'obra_id': '6', 'nombre': 'Puntales telescópicos metálicos'},
+        {'obra_id': '6', 'nombre': 'Desmoldante líquido'},
+        {'obra_id': '6', 'nombre': 'Hierro 16mm'},
+      ];
+
+  /// Reportes diarios iniciales con FKs a `obras` y `usuarios`.
   List<Map<String, dynamic>> _semillasReportes() => [
         {
           'id': 'rep_101',
           'obra_id': '1',
-          'obra_nombre': 'Torre Residencial Las Heras',
+          'autor_id': 'u_capataz',
           'fecha_creacion_local':
-              DateTime(2026, 9, 18, 16, 30).toIso8601String(),
+              DateTime.utc(2026, 9, 18, 16, 30).toIso8601String(),
           'fecha_sincronizacion':
-              DateTime(2026, 9, 18, 18, 0).toIso8601String(),
-          'tareas': 'Losa de planta alta',
+              DateTime.utc(2026, 9, 18, 18, 0).toIso8601String(),
+          'tarea_seleccionada': 'Losa de planta alta',
           'tarea_completada': 0,
-          'materiales': jsonEncode([
-            'Hierro nervado 12mm',
-            'Madera para encofrado',
-          ]),
           'observaciones':
               'Faltó hormigón el martes. Proveedor reprogramó entrega.',
-          'url_fotos': jsonEncode([
-            {
-              'rutaLocal': 'assets/images/obra1.png',
-              'origen': 'Cámara (Comprimida)',
-              'anchoPx': 800,
-              'altoPx': 600,
-              'calidadPct': 70,
-              'pesoKb': 142,
-            },
-          ]),
           'estado_semaforo': 'problemas',
-          'autor_nombre': 'Carlos Méndez (Capataz)',
           'sync_status': 'synced',
           'obra_finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 18, 16, 30).toIso8601String(),
         },
         {
           'id': 'rep_102',
           'obra_id': '2',
-          'obra_nombre': 'Complejo Comercial Belgrano',
+          'autor_id': 'u_capataz',
           'fecha_creacion_local':
-              DateTime(2026, 9, 18, 17, 15).toIso8601String(),
+              DateTime.utc(2026, 9, 18, 17, 15).toIso8601String(),
           'fecha_sincronizacion':
-              DateTime(2026, 9, 18, 18, 0).toIso8601String(),
-          'tareas': 'Mampostería piso 2',
+              DateTime.utc(2026, 9, 18, 18, 0).toIso8601String(),
+          'tarea_seleccionada': 'Mampostería piso 2',
           'tarea_completada': 1,
-          'materiales': jsonEncode([
-            'Ladrillón cerámico 18x18x33',
-            'Cemento Portland',
-            'Arena gruesa',
-          ]),
           'observaciones':
               'Sin novedades. Se completó el cerramiento del piso 2.',
-          'url_fotos': jsonEncode([
-            {
-              'rutaLocal': 'assets/images/obra2.png',
-              'origen': 'Cámara (Comprimida)',
-              'anchoPx': 800,
-              'altoPx': 600,
-              'calidadPct': 70,
-              'pesoKb': 158,
-            },
-          ]),
           'estado_semaforo': 'aTiempo',
-          'autor_nombre': 'Carlos Méndez (Capataz)',
           'sync_status': 'synced',
           'obra_finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 18, 17, 15).toIso8601String(),
         },
         {
           'id': 'rep_103',
           'obra_id': '3',
-          'obra_nombre': 'Nave Industrial Parque Sur',
+          'autor_id': 'u_capataz',
           'fecha_creacion_local':
-              DateTime(2026, 9, 17, 18, 0).toIso8601String(),
+              DateTime.utc(2026, 9, 17, 18, 0).toIso8601String(),
           'fecha_sincronizacion': null,
-          'tareas': 'Instalación eléctrica trifásica',
+          'tarea_seleccionada': 'Instalación eléctrica trifásica',
           'tarea_completada': 0,
-          'materiales': jsonEncode(['Bandejas portacables galvanizadas']),
           'observaciones': 'Lluvia, se perdieron dos días en tendido exterior.',
-          'url_fotos': jsonEncode([]),
           'estado_semaforo': 'demorada',
-          'autor_nombre': 'Carlos Méndez (Capataz)',
           'sync_status': 'pending',
           'obra_finalizada': 0,
+          'updated_at': DateTime.utc(2026, 9, 17, 18, 0).toIso8601String(),
+        },
+      ];
+
+  /// Materiales consumidos por reporte en `reporte_materiales`.
+  List<Map<String, dynamic>> _semillasReporteMateriales() => [
+        {'reporte_id': 'rep_101', 'nombre': 'Hierro nervado 12mm'},
+        {'reporte_id': 'rep_101', 'nombre': 'Madera para encofrado'},
+        {'reporte_id': 'rep_102', 'nombre': 'Ladrillón cerámico 18x18x33'},
+        {'reporte_id': 'rep_102', 'nombre': 'Cemento Portland'},
+        {'reporte_id': 'rep_102', 'nombre': 'Arena gruesa'},
+        {
+          'reporte_id': 'rep_103',
+          'nombre': 'Bandejas portacables galvanizadas'
+        },
+      ];
+
+  /// Fotografías comprimidas asociadas a reportes en `reporte_fotos`.
+  List<Map<String, dynamic>> _semillasReporteFotos() => [
+        {
+          'reporte_id': 'rep_101',
+          'ruta_local': 'assets/images/obra1.png',
+          'origen': 'Cámara (Comprimida)',
+          'ancho_px': 800,
+          'alto_px': 600,
+          'calidad_pct': 70,
+          'peso_kb': 142,
+          'bytes_base64': null,
+          'url_remota': null,
+          'estado_subida': 'synced',
+        },
+        {
+          'reporte_id': 'rep_102',
+          'ruta_local': 'assets/images/obra2.png',
+          'origen': 'Cámara (Comprimida)',
+          'ancho_px': 800,
+          'alto_px': 600,
+          'calidad_pct': 70,
+          'peso_kb': 158,
+          'bytes_base64': null,
+          'url_remota': null,
+          'estado_subida': 'synced',
         },
       ];
 
   List<Map<String, dynamic>> _semillasNotificaciones() => [
         {
           'id': 'notif_1',
+          'obra_id': '1',
           'titulo': 'Alerta Roja: Torre Residencial Las Heras',
           'mensaje':
               'La obra pasó a estado "Con problemas" (Rojo). Motivo: Faltó hormigón el martes.',
           'destinatario': 'Ing. Braulio Hormigón / Roberto Del Sur (Dueño)',
-          'fecha_hora': DateTime(2026, 9, 18, 16, 31).toIso8601String(),
+          'fecha_hora': DateTime.utc(2026, 9, 18, 16, 31).toIso8601String(),
           'es_alerta_semaforo': 1,
+          'updated_at': DateTime.utc(2026, 9, 18, 16, 31).toIso8601String(),
+          'sync_status': 'synced',
         },
         {
           'id': 'notif_2',
+          'obra_id': '3',
           'titulo': 'Alerta Amarilla: Nave Industrial Parque Sur',
           'mensaje':
               'La obra pasó a estado "Demorada" (Amarillo). Motivo: Lluvia, se perdieron dos días.',
           'destinatario': 'Ing. Braulio Hormigón / Roberto Del Sur (Dueño)',
-          'fecha_hora': DateTime(2026, 9, 17, 18, 1).toIso8601String(),
+          'fecha_hora': DateTime.utc(2026, 9, 17, 18, 1).toIso8601String(),
           'es_alerta_semaforo': 1,
+          'updated_at': DateTime.utc(2026, 9, 17, 18, 1).toIso8601String(),
+          'sync_status': 'synced',
         },
       ];
 }

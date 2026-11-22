@@ -171,8 +171,7 @@ class InicioCapatazScreen extends StatelessWidget {
         return Column(
           children: [
             ResumenSemaforoBar(
-              cantidadATiempo:
-                  viewModel.cantidadPorEstado(EstadoObra.aTiempo),
+              cantidadATiempo: viewModel.cantidadPorEstado(EstadoObra.aTiempo),
               cantidadDemoradas:
                   viewModel.cantidadPorEstado(EstadoObra.demorada),
               cantidadConProblemas:
@@ -184,28 +183,51 @@ class InicioCapatazScreen extends StatelessWidget {
               onAlternarFinalizadas: viewModel.alternarFiltroFinalizadas,
             ),
             Expanded(
-              child: obrasDelCapataz.isEmpty
-                  ? Center(
-                      child: Text(
-                        viewModel.mostrarSoloFinalizadas
-                            ? 'No hay obras finalizadas asignadas a tu perfil.'
-                            : 'No hay obras asignadas con el estado de semáforo seleccionado.',
-                      ),
-                    )
-                  : SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          for (final obra in obrasDelCapataz)
-                            ObraItemCapataz(
-                              obra: obra,
-                              onTap: () =>
-                                  _mostrarSnackbarObraCapataz(context, obra),
+              child: viewModel.estado == EstadoCargaObras.cargando
+                  ? const Center(child: CircularProgressIndicator())
+                  : viewModel.estado == EstadoCargaObras.error
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                viewModel.mensajeError ??
+                                    'No se pudieron cargar tus obras.',
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 12),
+                              FilledButton.tonal(
+                                onPressed: () =>
+                                    viewModel.cargar(forzarRecarga: true),
+                                child: const Text('Reintentar'),
+                              ),
+                            ],
+                          ),
+                        )
+                      : obrasDelCapataz.isEmpty
+                          ? Center(
+                              child: Text(
+                                viewModel.mostrarSoloFinalizadas
+                                    ? 'No hay obras finalizadas asignadas a tu perfil.'
+                                    : 'No hay obras asignadas con el estado de semáforo seleccionado.',
+                              ),
+                            )
+                          : SingleChildScrollView(
+                              padding: const EdgeInsets.all(16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  for (final obra in obrasDelCapataz)
+                                    ObraItemCapataz(
+                                      obra: obra,
+                                      onTap: () => _mostrarSnackbarObraCapataz(
+                                        context,
+                                        obra,
+                                      ),
+                                    ),
+                                ],
+                              ),
                             ),
-                        ],
-                      ),
-                    ),
             ),
           ],
         );

@@ -88,33 +88,54 @@ class _InicioDuenioScreenState extends State<InicioDuenioScreen> {
               estadoSeleccionado: widget.viewModel.filtroEstadoSemaforo,
               mostrarSoloFinalizadas: widget.viewModel.mostrarSoloFinalizadas,
               onSeleccionarEstado: widget.viewModel.seleccionarFiltroSemaforo,
-              onAlternarFinalizadas:
-                  widget.viewModel.alternarFiltroFinalizadas,
+              onAlternarFinalizadas: widget.viewModel.alternarFiltroFinalizadas,
             ),
             Expanded(
-              child: visibles.isEmpty
-                  ? Center(
-                      child: Text(
-                        widget.viewModel.mostrarSoloFinalizadas
-                            ? 'Aún no hay obras marcadas como finalizadas'
-                            : 'No hay obras que coincidan con el filtro',
-                      ),
-                    )
-                  : GridView.builder(
-                      padding: const EdgeInsets.all(16),
-                      gridDelegate:
-                          const SliverGridDelegateWithFixedCrossAxisCount(
-                        crossAxisCount: 2,
-                        crossAxisSpacing: 20,
-                        mainAxisSpacing: 16,
-                        childAspectRatio: 0.76,
-                      ),
-                      itemCount: visibles.length,
-                      itemBuilder: (context, i) => ObraCard(
-                        obra: visibles[i],
-                        onTap: () => _abrirDetalleSoloLectura(visibles[i]),
-                      ),
-                    ),
+              child: widget.viewModel.estado == EstadoCargaObras.cargando
+                  ? const Center(child: CircularProgressIndicator())
+                  : widget.viewModel.estado == EstadoCargaObras.error
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                widget.viewModel.mensajeError ??
+                                    'No se pudieron cargar las obras.',
+                                textAlign: TextAlign.center,
+                              ),
+                              const SizedBox(height: 12),
+                              FilledButton.tonal(
+                                onPressed: () => widget.viewModel
+                                    .cargar(forzarRecarga: true),
+                                child: const Text('Reintentar'),
+                              ),
+                            ],
+                          ),
+                        )
+                      : visibles.isEmpty
+                          ? Center(
+                              child: Text(
+                                widget.viewModel.mostrarSoloFinalizadas
+                                    ? 'Aún no hay obras marcadas como finalizadas'
+                                    : 'No hay obras que coincidan con el filtro',
+                              ),
+                            )
+                          : GridView.builder(
+                              padding: const EdgeInsets.all(16),
+                              gridDelegate:
+                                  const SliverGridDelegateWithFixedCrossAxisCount(
+                                crossAxisCount: 2,
+                                crossAxisSpacing: 20,
+                                mainAxisSpacing: 16,
+                                childAspectRatio: 0.76,
+                              ),
+                              itemCount: visibles.length,
+                              itemBuilder: (context, i) => ObraCard(
+                                obra: visibles[i],
+                                onTap: () =>
+                                    _abrirDetalleSoloLectura(visibles[i]),
+                              ),
+                            ),
             ),
           ],
         );

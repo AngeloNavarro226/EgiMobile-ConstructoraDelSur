@@ -134,7 +134,7 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
       username: 'capataz',
       nombre: 'Carlos Méndez (Capataz)',
       contrasenia: '1234',
-      rol: RolUsuario.capataz,
+      rol: Rol.capataz,
     );
   }
 
@@ -151,9 +151,8 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
       responsable: responsable,
       nombresTareas:
           _tareas.isEmpty ? ['Tarea inicial de obra'] : List.from(_tareas),
-      materiales: _materiales.isEmpty
-          ? ['Cemento Portland']
-          : List.from(_materiales),
+      materiales:
+          _materiales.isEmpty ? ['Cemento Portland'] : List.from(_materiales),
       ubicacion: _ubicacionSeleccionada,
       estadoInicial: _estado,
       observaciones: _controladorObservaciones.text,

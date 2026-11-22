@@ -1,5 +1,4 @@
-import 'plataforma_io_stub.dart'
-    if (dart.library.io) 'plataforma_io_real.dart';
+import 'plataforma_io_stub.dart' if (dart.library.io) 'plataforma_io_real.dart';
 
 /// Resultado de la descarga de un archivo de exportación para SIGO.
 class ResultadoDescargaArchivo {

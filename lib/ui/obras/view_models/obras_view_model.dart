@@ -1,14 +1,14 @@
 import 'dart:async';
 
-import 'package:flutter/foundation.dart';
-
 import '../../../data/repositories/autenticacion_repository.dart';
 import '../../../data/repositories/notificaciones_repository.dart';
 import '../../../data/repositories/obras_repository.dart';
 import '../../../data/repositories/preferencias_repository.dart';
 import '../../../data/services/bus_de_eventos.dart';
+import '../../../data/services/generador_ids.dart';
 import '../../../data/services/mapa_service.dart';
 import '../../../data/services/multimedia_service.dart';
+import '../../../data/services/reloj.dart';
 import '../../../data/services/sincronizacion_service.dart';
 import '../../../data/services/voz_a_texto_service.dart';
 import '../../../domain/models/evento_de_app.dart';
@@ -18,13 +18,14 @@ import '../../../domain/models/tarea_obra.dart';
 import '../../../domain/models/ubicacion_obra.dart';
 import '../../../domain/models/usuario.dart';
 import '../../../plataforma/politicas.dart';
+import '../../core/view_model_base.dart';
 
 /// Estado de carga para las pantallas de obras.
 enum EstadoCargaObras { cargando, exito, error }
 
 /// ViewModel que administra la visualización y acciones sobre las obras y sus
 /// informes diarios, respetando los permisos de cada rol (Capataz, Ingeniero, Dueño).
-class ObrasViewModel extends ChangeNotifier {
+class ObrasViewModel extends ViewModelBase {
   ObrasViewModel({
     required ObrasRepository obrasRepository,
     required AutenticacionRepository autenticacionRepository,
@@ -36,6 +37,8 @@ class ObrasViewModel extends ChangeNotifier {
     required Politicas politicas,
     PreferenciasRepository? preferenciasRepository,
     BusDeEventos? busDeEventos,
+    Reloj reloj = const RelojDelSistema(),
+    GeneradorIds? generadorIds,
   })  : _obrasRepository = obrasRepository,
         _autenticacionRepository = autenticacionRepository,
         _notificacionesRepository = notificacionesRepository,
@@ -45,11 +48,14 @@ class ObrasViewModel extends ChangeNotifier {
         _mapaService = mapaService,
         _politicas = politicas,
         _preferenciasRepository = preferenciasRepository,
-        _busDeEventos = busDeEventos {
+        _busDeEventos = busDeEventos,
+        _reloj = reloj,
+        _generadorIds = generadorIds ?? GeneradorUuidV4() {
     _suscripcionConexion =
         _sincronizacionService.alDetectarConexion.listen((_) {
       unawaited(iniciarSincronizacionConAlerta());
     });
+    _suscripcionEventos = _busDeEventos?.stream.listen(_procesarEventoGlobal);
   }
 
   final ObrasRepository _obrasRepository;
@@ -62,37 +68,61 @@ class ObrasViewModel extends ChangeNotifier {
   final Politicas _politicas;
   final PreferenciasRepository? _preferenciasRepository;
   final BusDeEventos? _busDeEventos;
+  final Reloj _reloj;
+  final GeneradorIds _generadorIds;
 
   StreamSubscription<bool>? _suscripcionConexion;
+  StreamSubscription<EventoDeApp>? _suscripcionEventos;
   Timer? _temporizadorAlertaSync;
 
   EstadoCargaObras _estado = EstadoCargaObras.cargando;
+  bool _guardando = false;
+  bool _sincronizando = false;
+  bool _cargandoReportesObra = false;
+  String? _mensajeError;
+  String? _mensajeErrorSincronizacion;
+
   List<Obra> _todasLasObras = [];
   List<ReporteDiario> _reportes = [];
+  final Map<String, List<ReporteDiario>> _reportesPorObraCache = {};
   List<Usuario> _responsablesDisponibles = [];
   String _textoBusqueda = '';
   EstadoObra? _filtroEstadoSemaforo;
   bool _mostrarSoloFinalizadas = false;
   bool _mostrandoAlertaSincronizacion = false;
   bool _escuchandoDictadoVoz = false;
+  bool _procesandoFoto = false;
   String? _errorVozATexto;
   String? _mensajeProgresoFoto;
 
   /// Estado actual de la carga de datos.
   EstadoCargaObras get estado => _estado;
 
-  /// Filtro de estado de semáforo activo al tocar uno de los chips superiores
-  /// (`null` muestra todos los estados activos).
+  /// Indica si hay una escritura o guardado en curso.
+  bool get guardando => _guardando;
+
+  /// Indica si hay una sincronización en curso.
+  bool get sincronizando => _sincronizando;
+
+  /// Indica si se está cargando el historial de reportes de una obra.
+  bool get cargandoReportesObra => _cargandoReportesObra;
+
+  /// Indica si se está procesando una fotografía en segundo plano.
+  bool get procesandoFoto => _procesandoFoto;
+
+  /// Último mensaje de error de carga o guardado.
+  String? get mensajeError => _mensajeError;
+
+  /// Último error reportado durante la sincronización Offline-First.
+  String? get mensajeErrorSincronizacion => _mensajeErrorSincronizacion;
+
+  /// Filtro de estado de semáforo activo al tocar uno de los chips superiores.
   EstadoObra? get filtroEstadoSemaforo => _filtroEstadoSemaforo;
 
   /// Indica si el filtro `"Finalizadas"` está seleccionado.
-  ///
-  /// Cuando es `false` (por defecto), las obras finalizadas se ocultan de las
-  /// vistas principales; cuando es `true`, se muestran únicamente las obras
-  /// finalizadas.
   bool get mostrarSoloFinalizadas => _mostrarSoloFinalizadas;
 
-  /// Indica si se debe mostrar la alerta de 2 segundos `"Comenzando sincronización"`.
+  /// Indica si se debe mostrar la alerta de `"Comenzando sincronización"`.
   bool get mostrandoAlertaSincronizacion => _mostrandoAlertaSincronizacion;
 
   /// Indica si el micrófono de transcripción de voz está activo.
@@ -118,13 +148,11 @@ class ObrasViewModel extends ChangeNotifier {
   List<UbicacionObra> get ubicacionesSugeridas =>
       _mapaService.ubicacionesFrecuentes;
 
-  /// Obras visibles para el usuario activo según su rol:
-  /// - Capataz: solo ve las obras de las que es responsable.
-  /// - Ingeniero y Dueño: ven todas las obras.
+  /// Obras visibles para el usuario activo según su rol.
   List<Obra> get obrasVisiblesPorRol {
     final usuario = usuarioActual;
     if (usuario == null) return List.unmodifiable(_todasLasObras);
-    if (_politicas.puedeVerTodasLasObras(usuario.rol)) {
+    if (_politicas.puedeVerTodasLasObras(usuario.rol.tipo)) {
       return List.unmodifiable(_todasLasObras);
     }
     return List.unmodifiable(
@@ -132,12 +160,7 @@ class ObrasViewModel extends ChangeNotifier {
     );
   }
 
-  /// Obras filtradas según:
-  /// 1. Si [mostrarSoloFinalizadas] es `true`, muestra únicamente las obras
-  ///    con `finalizada == true`.
-  /// 2. Si [mostrarSoloFinalizadas] es `false` (por defecto), oculta las obras
-  ///    finalizadas y aplica el filtro de chip de semáforo ([filtroEstadoSemaforo]).
-  /// 3. Aplica el texto de búsqueda por nombre.
+  /// Obras filtradas según estado de finalización, semáforo y búsqueda.
   List<Obra> get obrasFiltradas {
     Iterable<Obra> resultado = obrasVisiblesPorRol;
 
@@ -167,8 +190,7 @@ class ObrasViewModel extends ChangeNotifier {
       .where((r) => r.syncStatus == EstadoSincronizacion.pending)
       .length;
 
-  /// Cuenta cuántas obras activas (no finalizadas) visibles para este rol
-  /// tienen el [EstadoObra] indicado.
+  /// Cuenta cuántas obras activas visibles para este rol tienen [estadoBuscado].
   int cantidadPorEstado(EstadoObra estadoBuscado) => obrasVisiblesPorRol
       .where((o) => !o.finalizada && o.estado == estadoBuscado)
       .length;
@@ -185,9 +207,38 @@ class ObrasViewModel extends ChangeNotifier {
     return null;
   }
 
-  /// Devuelve el historial de informes pasados de una obra específica.
-  List<ReporteDiario> informesDeObra(String obraId) =>
-      _reportes.where((r) => r.obraId == obraId).toList();
+  /// Devuelve el historial de informes de una obra (priorizando la caché
+  /// cargada bajo demanda desde SQLite).
+  List<ReporteDiario> informesDeObra(String obraId) {
+    final enCache = _reportesPorObraCache[obraId];
+    if (enCache != null) return List.unmodifiable(enCache);
+    return _reportes.where((r) => r.obraId == obraId).toList();
+  }
+
+  /// Carga bajo demanda el historial de reportes de una obra puntual desde SQLite.
+  Future<void> cargarReportesDeObra(
+    String obraId, {
+    int? limite,
+    int? desplazamiento,
+  }) async {
+    _cargandoReportesObra = true;
+    _mensajeError = null;
+    notificarSiActivo();
+    try {
+      final lista = await _obrasRepository.obtenerReportesPorObra(
+        obraId,
+        limite: limite,
+        desplazamiento: desplazamiento,
+      );
+      _reportesPorObraCache[obraId] = lista;
+      _cargandoReportesObra = false;
+      notificarSiActivo();
+    } catch (e) {
+      _cargandoReportesObra = false;
+      _mensajeError = 'No se pudo cargar el historial de reportes: $e';
+      notificarSiActivo();
+    }
+  }
 
   /// Devuelve el último informe cargado para una obra, o `null` si aún no tiene.
   ReporteDiario? ultimoInformeDeObra(String obraId) {
@@ -196,8 +247,7 @@ class ObrasViewModel extends ChangeNotifier {
     return lista.first;
   }
 
-  /// Transcribe el nombre del lugar al que apuntan las coordenadas elegidas
-  /// en Google Maps.
+  /// Transcribe el nombre del lugar al que apuntan las coordenadas elegidas.
   Future<String> obtenerNombreLugarDesdeCoordenadas(
     double latitud,
     double longitud,
@@ -206,15 +256,18 @@ class ObrasViewModel extends ChangeNotifier {
   }
 
   /// Guarda automáticamente el borrador de observaciones cuando la app pasa
-  /// a segundo plano (`onHide`)
+  /// a segundo plano (`onHide`).
   Future<void> guardarBorradorInforme(String texto) async {
     await _preferenciasRepository?.guardarBorradorObservaciones(texto);
   }
 
-  /// Carga las obras, reportes y responsables desde los repositorios.
+  /// Carga las obras, reportes y responsables desde los repositorios,
+  /// notificando explícitamente en `cargando`, `exito` y `error`.
   Future<void> cargar({bool forzarRecarga = false}) async {
     _estado = EstadoCargaObras.cargando;
-    notifyListeners();
+    _mensajeError = null;
+    notificarSiActivo();
+
     try {
       await _sincronizacionService.inicializar();
       _todasLasObras = await _obrasRepository.obtenerObras(
@@ -223,20 +276,23 @@ class ObrasViewModel extends ChangeNotifier {
       _reportes = await _obrasRepository.obtenerReportes(
         forzarRecarga: forzarRecarga,
       );
+      _reportesPorObraCache.clear();
       _responsablesDisponibles =
           await _autenticacionRepository.obtenerResponsablesDisponibles();
       _estado = EstadoCargaObras.exito;
-    } catch (_) {
+      notificarSiActivo();
+    } catch (e) {
       _estado = EstadoCargaObras.error;
-    } finally {
-      notifyListeners();
+      _mensajeError = 'Error al cargar las obras: $e';
+      notificarSiActivo();
     }
   }
 
   /// Actualiza el filtro de búsqueda por nombre de obra.
   void actualizarBusqueda(String texto) {
+    if (_textoBusqueda == texto) return;
     _textoBusqueda = texto;
-    notifyListeners();
+    notificarSiActivo();
   }
 
   /// Selecciona o deselecciona un estado de semáforo como filtro de las obras.
@@ -247,33 +303,48 @@ class ObrasViewModel extends ChangeNotifier {
     } else {
       _filtroEstadoSemaforo = nuevoFiltro;
     }
-    notifyListeners();
+    notificarSiActivo();
   }
 
-  /// Activa o desactiva el filtro de obras finalizadas (cuando está activo,
-  /// muestra solo las obras finalizadas; cuando está inactivo, se ocultan).
+  /// Activa o desactiva el filtro de obras finalizadas.
   void alternarFiltroFinalizadas(bool activo) {
     _mostrarSoloFinalizadas = activo;
     if (activo) {
       _filtroEstadoSemaforo = null;
     }
-    notifyListeners();
+    notificarSiActivo();
   }
 
-  /// Dispara la alerta visual de `"Comenzando sincronización"` durante 2 segundos
-  /// y actualiza los reportes pendientes a estado `synced`.
+  /// Dispara el ciclo real de sincronización con exclusión mutua y alerta visual.
   Future<void> iniciarSincronizacionConAlerta() async {
+    if (_sincronizando) return;
     _temporizadorAlertaSync?.cancel();
+    _sincronizando = true;
     _mostrandoAlertaSincronizacion = true;
-    notifyListeners();
+    _mensajeErrorSincronizacion = null;
+    notificarSiActivo();
 
-    final sincronizados = await _obrasRepository.sincronizarReportesPendientes();
-    _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
-    _busDeEventos?.emitir(SincronizacionCompletada(sincronizados));
+    try {
+      final resultado = await _obrasRepository.sincronizarTodo(
+        permitirSimulacionLocal: true,
+      );
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
+      _reportesPorObraCache.clear();
+      if (resultado.tuvoErrores) {
+        _mensajeErrorSincronizacion = resultado.mensajeError;
+      }
+      _sincronizando = false;
+      notificarSiActivo();
+    } catch (e) {
+      _sincronizando = false;
+      _mensajeErrorSincronizacion = 'Error durante la sincronización: $e';
+      notificarSiActivo();
+    }
 
     _temporizadorAlertaSync = Timer(const Duration(seconds: 2), () {
       _mostrandoAlertaSincronizacion = false;
-      notifyListeners();
+      notificarSiActivo();
     });
   }
 
@@ -283,43 +354,77 @@ class ObrasViewModel extends ChangeNotifier {
     String obraId,
     EstadoObra nuevoEstado,
   ) async {
-    final actualizada = await _obrasRepository.cambiarEstadoSemaforo(
-      obraId,
-      nuevoEstado,
-    );
-    if (actualizada == null) return;
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
 
-    if (nuevoEstado.requiereAlertaProactiva) {
-      await _notificacionesRepository.emitirAlertaCambioSemaforo(
-        obra: actualizada,
-        motivo:
-            'Cambio de semáforo en obra "${actualizada.nombre}" a ${nuevoEstado.etiqueta}.',
+    try {
+      final actualizada = await _obrasRepository.cambiarEstadoSemaforo(
+        obraId,
+        nuevoEstado,
       );
-    }
+      if (actualizada == null) {
+        _guardando = false;
+        notificarSiActivo();
+        return;
+      }
 
-    _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
-    notifyListeners();
+      if (nuevoEstado.requiereAlertaProactiva) {
+        await _notificacionesRepository.emitirAlertaCambioSemaforo(
+          obra: actualizada,
+          motivo:
+              'Cambio de semáforo en obra "${actualizada.nombre}" a ${nuevoEstado.etiqueta}.',
+        );
+      }
+
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _guardando = false;
+      notificarSiActivo();
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo actualizar el semáforo: $e';
+      notificarSiActivo();
+    }
   }
 
-  /// Añade una nueva tarea a una obra y recalcula automáticamente su porcentaje.
+  /// Añade una nueva tarea a una obra mediante inserción granular.
   Future<void> agregarTareaAObra(String obraId, String nombreTarea) async {
     if (nombreTarea.trim().isEmpty) return;
-    await _obrasRepository.agregarTareaAObra(obraId, nombreTarea);
-    _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
-    notifyListeners();
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
+
+    try {
+      await _obrasRepository.agregarTareaAObra(obraId, nombreTarea);
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _guardando = false;
+      notificarSiActivo();
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo agregar la tarea: $e';
+      notificarSiActivo();
+    }
   }
 
-  /// Marca una tarea como completada o pendiente directamente sin requerir un
-  /// informe, actualizando automáticamente la barra porcentual de progreso.
+  /// Marca una tarea como completada o pendiente de forma atómica.
   Future<void> alternarTareaCompletada(String obraId, String tareaId) async {
-    await _obrasRepository.alternarTareaCompletada(obraId, tareaId);
-    _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
-    notifyListeners();
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
+
+    try {
+      await _obrasRepository.alternarTareaCompletada(obraId, tareaId);
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _guardando = false;
+      notificarSiActivo();
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo actualizar el estado de la tarea: $e';
+      notificarSiActivo();
+    }
   }
 
-  /// Crea una nueva obra desde la vista del Ingeniero con listado de tareas,
-  /// responsable asignado, materiales a utilizar, ubicación de Google Maps y
-  /// fotografía de portada personalizada opcional.
+  /// Crea una nueva obra desde la vista del Ingeniero con IDs UUID v4 y UTC.
   Future<void> crearNuevaObra({
     required String nombre,
     required Usuario responsable,
@@ -330,52 +435,66 @@ class ObrasViewModel extends ChangeNotifier {
     required String observaciones,
     String? imagenPortadaPersonalizada,
   }) async {
-    final tareasCreadas = [
-      for (var i = 0; i < nombresTareas.length; i++)
-        TareaObra(
-          id: 't_${DateTime.now().microsecondsSinceEpoch}_$i',
-          nombre: nombresTareas[i],
-          completada: false,
-        ),
-    ];
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
 
-    final tienePortadaPropia = imagenPortadaPersonalizada != null &&
-        imagenPortadaPersonalizada.isNotEmpty;
+    try {
+      final ahoraUtc = _reloj.ahora().toUtc();
+      final tareasCreadas = [
+        for (final nombreTarea in nombresTareas)
+          TareaObra(
+            id: _generadorIds.generar(),
+            nombre: nombreTarea,
+            completada: false,
+            updatedAt: ahoraUtc,
+            syncStatus: EstadoSincronizacion.pending,
+          ),
+      ];
 
-    final nuevaObra = Obra(
-      id: DateTime.now().microsecondsSinceEpoch.toString(),
-      nombre: nombre.trim(),
-      estado: estadoInicial,
-      fechaUltimoReporte: DateTime.now(),
-      responsableId: responsable.id,
-      responsableNombre: responsable.nombre,
-      tareas: tareasCreadas,
-      materiales: materiales,
-      ubicacion: ubicacion,
-      observaciones: observaciones.trim(),
-      conFoto: tienePortadaPropia,
-      imagen: tienePortadaPropia
-          ? imagenPortadaPersonalizada
-          : 'assets/images/obra${(_todasLasObras.length % 6) + 1}.png',
-    );
+      final tienePortadaPropia = imagenPortadaPersonalizada != null &&
+          imagenPortadaPersonalizada.isNotEmpty;
 
-    await _obrasRepository.guardarObra(nuevaObra);
-    if (estadoInicial.requiereAlertaProactiva) {
-      await _notificacionesRepository.emitirAlertaCambioSemaforo(
-        obra: nuevaObra,
-        motivo: observaciones.trim().isEmpty
-            ? 'Obra creada en estado ${estadoInicial.etiqueta}.'
-            : observaciones.trim(),
+      final nuevaObra = Obra(
+        id: _generadorIds.generar(),
+        nombre: nombre.trim(),
+        estado: estadoInicial,
+        fechaUltimoReporte: ahoraUtc,
+        responsableId: responsable.id,
+        responsableNombre: responsable.nombre,
+        tareas: tareasCreadas,
+        materiales: materiales,
+        ubicacion: ubicacion,
+        observaciones: observaciones.trim(),
+        conFoto: tienePortadaPropia,
+        imagen: tienePortadaPropia
+            ? imagenPortadaPersonalizada
+            : 'assets/images/obra${(_todasLasObras.length % 6) + 1}.png',
+        updatedAt: ahoraUtc,
+        syncStatus: EstadoSincronizacion.pending,
       );
-    }
 
-    _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
-    notifyListeners();
+      await _obrasRepository.guardarObra(nuevaObra);
+      if (estadoInicial.requiereAlertaProactiva) {
+        await _notificacionesRepository.emitirAlertaCambioSemaforo(
+          obra: nuevaObra,
+          motivo: observaciones.trim().isEmpty
+              ? 'Obra creada en estado ${estadoInicial.etiqueta}.'
+              : observaciones.trim(),
+        );
+      }
+
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _guardando = false;
+      notificarSiActivo();
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo crear la obra: $e';
+      notificarSiActivo();
+    }
   }
 
-  /// Registra un informe diario de terreno con opciones rápidas (tarea y materiales),
-  /// observaciones (con soporte de dictado por voz), fotografías comprimidas y
-  /// opción para marcar la obra como finalizada.
+  /// Registra un informe diario de terreno con ID UUID v4 y fecha UTC.
   Future<void> guardarInformeDiario({
     required Obra obra,
     required String tareaSeleccionada,
@@ -386,72 +505,99 @@ class ObrasViewModel extends ChangeNotifier {
     required List<FotoComprimida> fotosAdjuntas,
     bool finalizarObra = false,
   }) async {
-    final autor = usuarioActual?.nombre ?? obra.responsableNombre;
-    final nuevoReporte = ReporteDiario(
-      id: 'rep_${DateTime.now().microsecondsSinceEpoch}',
-      obraId: obra.id,
-      obraNombre: obra.nombre,
-      fechaCreacionLocal: DateTime.now(),
-      tareaSeleccionada: tareaSeleccionada,
-      tareaCompletadaEnInforme: marcarTareaComoCompletada || finalizarObra,
-      materialesUsados: materialesGastados,
-      observaciones: observaciones.trim(),
-      urlFotos: fotosAdjuntas,
-      estadoSemaforo: estadoSemaforo,
-      autorNombre: autor,
-      syncStatus: EstadoSincronizacion.pending,
-      obraFinalizada: finalizarObra,
-    );
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
 
-    final obraActualizada =
-        await _obrasRepository.registrarReporteDiario(nuevoReporte);
-
-    await _preferenciasRepository?.limpiarBorradorObservaciones();
-    _busDeEventos?.emitir(
-      InformeGuardado(
+    try {
+      final ahoraUtc = _reloj.ahora().toUtc();
+      final autorId = usuarioActual?.id ?? obra.responsableId;
+      final autor = usuarioActual?.nombre ?? obra.responsableNombre;
+      final nuevoReporte = ReporteDiario(
+        id: _generadorIds.generar(),
         obraId: obra.id,
+        obraNombre: obra.nombre,
+        autorId: autorId,
+        autorNombre: autor,
+        fechaCreacionLocal: ahoraUtc,
+        tareaSeleccionada: tareaSeleccionada,
+        tareaCompletadaEnInforme: marcarTareaComoCompletada || finalizarObra,
+        materialesUsados: materialesGastados,
+        observaciones: observaciones.trim(),
+        urlFotos: fotosAdjuntas,
+        estadoSemaforo: estadoSemaforo,
+        syncStatus: EstadoSincronizacion.pending,
         obraFinalizada: finalizarObra,
-      ),
-    );
-
-    if (obraActualizada != null && estadoSemaforo.requiereAlertaProactiva) {
-      await _notificacionesRepository.emitirAlertaCambioSemaforo(
-        obra: obraActualizada,
-        motivo: observaciones.trim().isEmpty
-            ? 'Informe diario reportó estado ${estadoSemaforo.etiqueta} en tarea "$tareaSeleccionada".'
-            : observaciones.trim(),
+        updatedAt: ahoraUtc,
       );
-    }
 
-    _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
-    _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
-    notifyListeners();
+      final obraActualizada =
+          await _obrasRepository.registrarReporteDiario(nuevoReporte);
+
+      await _preferenciasRepository?.limpiarBorradorObservaciones();
+      _busDeEventos?.emitir(
+        InformeGuardado(
+          obraId: obra.id,
+          obraFinalizada: finalizarObra,
+        ),
+      );
+
+      if (obraActualizada != null && estadoSemaforo.requiereAlertaProactiva) {
+        await _notificacionesRepository.emitirAlertaCambioSemaforo(
+          obra: obraActualizada,
+          motivo: observaciones.trim().isEmpty
+              ? 'Informe diario reportó estado ${estadoSemaforo.etiqueta} en tarea "$tareaSeleccionada".'
+              : observaciones.trim(),
+        );
+      }
+
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
+      _reportesPorObraCache.remove(obra.id);
+      _guardando = false;
+      notificarSiActivo();
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo guardar el informe diario: $e';
+      notificarSiActivo();
+    }
   }
 
-  /// Captura o selecciona una foto real y la procesa mediante `Stream` +
-  /// `Isolate` + `Workmanager` con compresión 800x600 al 70% (< 200 KB).
+  /// Captura o selecciona una foto real y la procesa mediante `Stream` + `Isolate`.
   Future<FotoComprimida?> adjuntarFotoComprimida({
     required bool desdeCamara,
   }) async {
+    _procesandoFoto = true;
+    _mensajeError = null;
+    notificarSiActivo();
+
     FotoComprimida? resultadoFinal;
-    await for (final progreso in _multimediaService.capturarYProcesarFoto(
-      desdeCamara: desdeCamara,
-      anchoObjetivo: _politicas.resolucionAnchoFoto,
-      altoObjetivo: _politicas.resolucionAltoFoto,
-      calidadObjetivo: _politicas.calidadCompresionFoto,
-      pesoMaximoKb: _politicas.pesoMaximoFotoKb,
-    )) {
-      _mensajeProgresoFoto = progreso.etapa;
-      if (progreso.fotoComprimida != null) {
-        resultadoFinal = progreso.fotoComprimida;
+    try {
+      await for (final progreso in _multimediaService.capturarYProcesarFoto(
+        desdeCamara: desdeCamara,
+        anchoObjetivo: _politicas.resolucionAnchoFoto,
+        altoObjetivo: _politicas.resolucionAltoFoto,
+        calidadObjetivo: _politicas.calidadCompresionFoto,
+        pesoMaximoKb: _politicas.pesoMaximoFotoKb,
+      )) {
+        _mensajeProgresoFoto = progreso.etapa;
+        if (progreso.fotoComprimida != null) {
+          resultadoFinal = progreso.fotoComprimida;
+        }
+        notificarSiActivo();
       }
-      notifyListeners();
+      _procesandoFoto = false;
+      notificarSiActivo();
+      return resultadoFinal;
+    } catch (e) {
+      _procesandoFoto = false;
+      _mensajeError = 'Error al procesar la fotografía: $e';
+      notificarSiActivo();
+      return null;
     }
-    return resultadoFinal;
   }
 
-  /// Inicia o detiene la transcripción real de voz a texto usando el micrófono
-  /// del dispositivo (`speech_to_text`), sin textos hardcodeados.
+  /// Inicia o detiene la transcripción real de voz a texto usando el micrófono.
   Future<void> alternarDictadoPorVoz({
     required void Function(String textoReconocido) onTextoReconocido,
     required void Function(String mensajeError) onErrorMicrofono,
@@ -460,12 +606,12 @@ class ObrasViewModel extends ChangeNotifier {
     if (_escuchandoDictadoVoz) {
       await _vozATextoService.detener();
       _escuchandoDictadoVoz = false;
-      notifyListeners();
+      notificarSiActivo();
       return;
     }
 
     _escuchandoDictadoVoz = true;
-    notifyListeners();
+    notificarSiActivo();
 
     final inicioExitoso = await _vozATextoService.iniciarEscucha(
       onResultado: (texto) {
@@ -475,23 +621,45 @@ class ObrasViewModel extends ChangeNotifier {
         _errorVozATexto = mensaje;
         _escuchandoDictadoVoz = false;
         onErrorMicrofono(mensaje);
-        notifyListeners();
+        notificarSiActivo();
       },
       onFinalizado: () {
         _escuchandoDictadoVoz = false;
-        notifyListeners();
+        notificarSiActivo();
       },
     );
 
     if (!inicioExitoso) {
       _escuchandoDictadoVoz = false;
-      notifyListeners();
+      notificarSiActivo();
+    }
+  }
+
+  void _procesarEventoGlobal(EventoDeApp evento) {
+    switch (evento) {
+      case SesionIniciada():
+        unawaited(cargar(forzarRecarga: true));
+      case SesionCerrada():
+        _obrasRepository.limpiarCache();
+        _todasLasObras = [];
+        _reportes = [];
+        _reportesPorObraCache.clear();
+        _responsablesDisponibles = [];
+        _textoBusqueda = '';
+        _filtroEstadoSemaforo = null;
+        _mostrarSoloFinalizadas = false;
+        _mensajeError = null;
+        _mensajeErrorSincronizacion = null;
+        notificarSiActivo();
+      default:
+        break;
     }
   }
 
   @override
   void dispose() {
     _suscripcionConexion?.cancel();
+    _suscripcionEventos?.cancel();
     _temporizadorAlertaSync?.cancel();
     super.dispose();
   }

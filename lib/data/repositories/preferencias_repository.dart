@@ -2,8 +2,8 @@ import 'dart:async';
 
 import '../services/preferencias_service.dart';
 
-/// Repositorio que mantiene y persiste las preferencias visuales y borradores
-/// de la sesión mediante [PreferenciasService]
+/// Repositorio que mantiene y persiste las preferencias visuales, sesión
+/// offline y borradores de la aplicación mediante [PreferenciasService].
 class PreferenciasRepository {
   PreferenciasRepository({PreferenciasService? preferenciasService})
       : _preferenciasService = preferenciasService ?? PreferenciasService();
@@ -13,6 +13,7 @@ class PreferenciasRepository {
   bool _modoOscuro = false;
   bool _recibirAlertasSemaforo = true;
   String _borradorObservaciones = '';
+  String? _usuarioSesionId;
 
   /// Indica si el tema oscuro está activo.
   bool get modoOscuro => _modoOscuro;
@@ -24,6 +25,9 @@ class PreferenciasRepository {
   /// Último borrador de observaciones guardado automáticamente.
   String get borradorObservaciones => _borradorObservaciones;
 
+  /// Identificador del usuario con sesión offline guardada.
+  String? get usuarioSesionId => _usuarioSesionId;
+
   /// Carga los valores persistidos en `SharedPreferencesAsync`.
   Future<void> inicializar() async {
     _modoOscuro = await _preferenciasService.obtenerTemaOscuro();
@@ -31,6 +35,7 @@ class PreferenciasRepository {
         await _preferenciasService.obtenerRecibirAlertas();
     _borradorObservaciones =
         await _preferenciasService.obtenerBorradorInforme();
+    _usuarioSesionId = await _preferenciasService.obtenerUsuarioSesionId();
   }
 
   /// Alterna entre el tema claro y oscuro y lo persiste en disco.
@@ -52,9 +57,28 @@ class PreferenciasRepository {
     await _preferenciasService.guardarBorradorInforme(texto);
   }
 
-  /// Limpia el borrador tras guardar un informe diario.
+  /// Limpia únicamente el borrador tras guardar un informe diario.
   Future<void> limpiarBorradorObservaciones() async {
     _borradorObservaciones = '';
+    await _preferenciasService.guardarBorradorInforme('');
+  }
+
+  /// Persiste la sesión del usuario para reabrir offline sin perder el acceso.
+  Future<void> guardarUsuarioSesionId(String? usuarioId) async {
+    _usuarioSesionId = usuarioId;
+    await _preferenciasService.guardarUsuarioSesionId(usuarioId);
+  }
+
+  /// Recupera el identificador de sesión persistido.
+  Future<String?> obtenerUsuarioSesionId() async {
+    _usuarioSesionId = await _preferenciasService.obtenerUsuarioSesionId();
+    return _usuarioSesionId;
+  }
+
+  /// Limpia borrador y sesión persistida al cerrar sesión.
+  Future<void> limpiarSesion() async {
+    _borradorObservaciones = '';
+    _usuarioSesionId = null;
     await _preferenciasService.limpiarPreferenciasDeSesion();
   }
 }

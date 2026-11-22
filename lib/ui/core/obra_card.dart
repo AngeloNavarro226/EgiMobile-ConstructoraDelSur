@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../domain/models/obra.dart';
+import 'imagen_local_o_remota.dart';
 import 'semaforo.dart';
 
 /// Tarjeta de obra para la vista en grilla (Ingeniero y Dueño) y tarjeta
@@ -242,8 +243,8 @@ class ObraItemCapataz extends StatelessWidget {
   }
 }
 
-/// Dibuja la foto de portada de una obra soportando tanto imágenes cargadas/tomadas
-/// por el ingeniero (`bytesImagenPortada` en Base64) como assets predefinidos.
+/// Dibuja la foto de portada de una obra soportando archivos locales en disco,
+/// URLs remotas de Storage, Base64 (web) y assets predefinidos.
 class ImagenPortadaObra extends StatelessWidget {
   const ImagenPortadaObra({super.key, required this.obra});
 
@@ -256,21 +257,15 @@ class ImagenPortadaObra extends StatelessWidget {
       child: const Icon(Icons.apartment, size: 48, color: Colors.black38),
     );
 
-    final bytesPortada = obra.bytesImagenPortada;
-    if (bytesPortada != null) {
-      return Image.memory(
-        bytesPortada,
-        fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => placeholder,
-      );
-    }
+    final urlRemota =
+        obra.imagenUrl ?? (obra.esImagenRemota ? obra.imagen : null);
 
-    final ruta = obra.imagen;
-    if (ruta == null || ruta.isEmpty) return placeholder;
-    return Image.asset(
-      ruta,
+    return ImagenLocalORemota(
+      bytesMemoria: obra.bytesImagenPortada,
+      rutaLocal: obra.imagen,
+      urlRemota: urlRemota,
       fit: BoxFit.cover,
-      errorBuilder: (_, __, ___) => placeholder,
+      placeholder: placeholder,
     );
   }
 }

@@ -1,7 +1,9 @@
+/// Implementación sobre `dart:io` para Android, iOS, Windows, macOS y Linux.
+library;
+
 import 'dart:convert';
 import 'dart:io';
-
-/// Implementación  sobre `dart:io` para Android, iOS, Windows, macOS y Linux.
+import 'dart:typed_data';
 
 /// Escribe físicamente el archivo `.csv` o `.json` en el almacenamiento del
 /// dispositivo (intentando primero la carpeta pública `Download` en Android o
@@ -37,8 +39,44 @@ Future<String> guardarArchivoExportadoEnPlataforma({
   return archivoFallback.path;
 }
 
+/// Persiste los bytes JPEG comprimidos de una fotografía en disco local bajo
+/// una carpeta dedicada de la aplicación y devuelve la ruta resultante.
+Future<String> guardarFotoEnAlmacenamientoLocal({
+  required String nombreArchivo,
+  required Uint8List bytes,
+}) async {
+  final sep = Platform.pathSeparator;
+  final carpetaFotos = Directory(
+    '${Directory.systemTemp.path}${sep}constructora_del_sur_fotos',
+  );
+  if (!await carpetaFotos.exists()) {
+    await carpetaFotos.create(recursive: true);
+  }
+  final archivo = File('${carpetaFotos.path}$sep$nombreArchivo');
+  await archivo.writeAsBytes(bytes, flush: true);
+  return archivo.path;
+}
+
+/// Lee los bytes de un archivo de fotografía almacenado en disco local, o
+/// devuelve `null` si el archivo no existe o no puede leerse.
+Future<Uint8List?> leerBytesDeArchivoLocal(String ruta) async {
+  if (ruta.isEmpty ||
+      ruta.startsWith('assets/') ||
+      ruta.startsWith('http://') ||
+      ruta.startsWith('https://')) {
+    return null;
+  }
+  try {
+    final archivo = File(ruta);
+    if (!await archivo.exists()) return null;
+    return await archivo.readAsBytes();
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Consulta el nombre real de la calle y localidad mediante geocodificación
-/// inversa HTTP aplicando `.timeout(const Duration(seconds: 3))`
+/// inversa HTTP aplicando `.timeout(const Duration(seconds: 3))`.
 Future<String?> consultarGeocodificacionRemota(
   double latitud,
   double longitud,
@@ -50,16 +88,14 @@ Future<String?> consultarGeocodificacionRemota(
       '&lat=${latitud.toStringAsFixed(6)}&lon=${longitud.toStringAsFixed(6)}'
       '&accept-language=es',
     );
-    final peticion = await cliente
-        .getUrl(uri)
-        .timeout(const Duration(seconds: 3));
+    final peticion =
+        await cliente.getUrl(uri).timeout(const Duration(seconds: 3));
     peticion.headers.set(
       HttpHeaders.userAgentHeader,
       'ConstructoraDelSurApp/2.3 (Mendoza)',
     );
-    final respuesta = await peticion
-        .close()
-        .timeout(const Duration(seconds: 3));
+    final respuesta =
+        await peticion.close().timeout(const Duration(seconds: 3));
     if (respuesta.statusCode != 200) return null;
 
     final cuerpo = await respuesta

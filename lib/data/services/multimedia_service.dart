@@ -8,6 +8,10 @@ import 'package:image_picker/image_picker.dart';
 import 'package:workmanager/workmanager.dart';
 
 import '../../domain/models/reporte_diario.dart';
+import 'generador_ids.dart';
+import 'plataforma_io_stub.dart' if (dart.library.io) 'plataforma_io_real.dart'
+    as plataforma_io;
+import 'reloj.dart';
 
 /// Nombre de la tarea en segundo plano registrada en Workmanager para subir fotos.
 const tareaSubidaFotosWorkmanager = 'subida_fotos_reporte_task';
@@ -27,11 +31,11 @@ class ProgresoProcesamientoFoto {
   final bool cancelado;
 }
 
-/// Función pura de nivel superior ejecutada dentro de `Isolate.run`
-///
+/// Función pura de nivel superior ejecutada dentro de `Isolate.run`.
 ///
 /// Recibe únicamente datos primitivos y [Uint8List] sin capturar `this` ni
-/// instancias con conexiones abiertas.
+/// instancias con conexiones abiertas. En plataformas nativas evita incrustar
+/// Base64 en SQLite (`incluirBase64: false`), reservándolo solo para Web.
 FotoComprimida codificarFotoEnSegundoPlano({
   required String ruta,
   required String origen,
@@ -40,12 +44,12 @@ FotoComprimida codificarFotoEnSegundoPlano({
   required int alto,
   required int calidad,
   required int pesoMaximoKb,
+  bool incluirBase64 = false,
 }) {
   final kbReales = (bytesComprimidos.lengthInBytes / 1024).round().clamp(
         1,
         pesoMaximoKb,
       );
-  final codificadoBase64 = base64Encode(bytesComprimidos);
   return FotoComprimida(
     rutaLocal: ruta,
     origen: origen,
@@ -53,19 +57,27 @@ FotoComprimida codificarFotoEnSegundoPlano({
     altoPx: alto,
     calidadPct: calidad,
     pesoKb: kbReales,
-    bytesBase64: codificadoBase64,
+    bytesBase64: incluirBase64 ? base64Encode(bytesComprimidos) : null,
+    estadoSubida: EstadoSincronizacion.pending,
   );
 }
 
 /// Servicio encargado de capturar imágenes reales desde la cámara o galería,
-/// comprimirlas a 800x600 al 70% de calidad (< 200 KB), codificar sus bytes
-/// para persistirlos en SQLite y procesarlos mediante un `Stream` + `Isolate` +
-/// `Workmanager`.
+/// comprimirlas a 800x600 al 70% de calidad (< 200 KB), persistirlas en disco
+/// local sin inflar SQLite con Base64 y encolarlas en `Workmanager`.
 class MultimediaService {
+  MultimediaService({
+    Reloj reloj = const RelojDelSistema(),
+    GeneradorIds? generadorIds,
+  })  : _reloj = reloj,
+        _generadorIds = generadorIds ?? GeneradorUuidV4();
+
   final ImagePicker _picker = ImagePicker();
+  final Reloj _reloj;
+  final GeneradorIds _generadorIds;
 
   /// Captura o selecciona una fotografía real y emite el progreso de compresión,
-  /// codificación en `Isolate` y encolado en `Workmanager` a través de un [Stream].
+  /// guardado local en disco y encolado en `Workmanager` a través de un [Stream].
   Stream<ProgresoProcesamientoFoto> capturarYProcesarFoto({
     required bool desdeCamara,
     required int anchoObjetivo,
@@ -104,7 +116,6 @@ class MultimediaService {
       return;
     }
 
-    final rutaSeleccionada = archivoSeleccionado.path;
     var bytesCapturados = await archivoSeleccionado.readAsBytes();
 
     yield const ProgresoProcesamientoFoto(
@@ -130,9 +141,17 @@ class MultimediaService {
     }
 
     yield const ProgresoProcesamientoFoto(
-      etapa: 'Procesando bytes en Isolate para almacenamiento local...',
+      etapa: 'Guardando fotografía comprimida en almacenamiento local...',
       porcentaje: 0.75,
     );
+
+    final nombreArchivo = 'foto_${_generadorIds.generar()}.jpg';
+    final rutaPersistente = kIsWeb
+        ? archivoSeleccionado.path
+        : await plataforma_io.guardarFotoEnAlmacenamientoLocal(
+            nombreArchivo: nombreArchivo,
+            bytes: bytesCapturados,
+          );
 
     final origenTexto =
         desdeCamara ? 'Cámara en obra' : 'Galería del dispositivo';
@@ -140,23 +159,25 @@ class MultimediaService {
 
     final resultadoIsolate = kIsWeb
         ? codificarFotoEnSegundoPlano(
-            ruta: rutaSeleccionada,
+            ruta: rutaPersistente,
             origen: origenTexto,
             bytesComprimidos: bytesParaIsolate,
             ancho: anchoObjetivo,
             alto: altoObjetivo,
             calidad: calidadObjetivo,
             pesoMaximoKb: pesoMaximoKb,
+            incluirBase64: true,
           )
         : await Isolate.run(
             () => codificarFotoEnSegundoPlano(
-              ruta: rutaSeleccionada,
+              ruta: rutaPersistente,
               origen: origenTexto,
               bytesComprimidos: bytesParaIsolate,
               ancho: anchoObjetivo,
               alto: altoObjetivo,
               calidad: calidadObjetivo,
               pesoMaximoKb: pesoMaximoKb,
+              incluirBase64: false,
             ),
           );
 
@@ -179,7 +200,7 @@ class MultimediaService {
     if (kIsWeb) return;
     try {
       await Workmanager().registerOneOffTask(
-        'upload_${DateTime.now().millisecondsSinceEpoch}',
+        'upload_${_reloj.ahora().toUtc().millisecondsSinceEpoch}_${_generadorIds.generar()}',
         tareaSubidaFotosWorkmanager,
         inputData: {
           'rutaLocal': foto.rutaLocal,

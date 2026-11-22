@@ -9,11 +9,11 @@ import '../view_models/perfil_view_model.dart';
 /// Pantalla de Perfil compartida por los 3 roles (Ingeniero, Capataz y Dueño).
 ///
 /// Permite:
-/// - Ver y modificar los datos del perfil activo en SQLite.
+/// - Ver y modificar los datos del perfil activo en SQLite (nombre, teléfono
+///   y contraseña).
 /// - Alternar el modo oscuro y las notificaciones.
-/// - Probar la detección de internet (disparando la alerta de 2 segundos
-///   `"Comenzando sincronización"`).
-/// - Cerrar sesión, enviando de regreso a la vista de iniciar sesión.
+/// - Probar la detección de internet / sincronización manual.
+/// - Cerrar sesión limpiando caché y sesión offline.
 class PerfilScreen extends StatelessWidget {
   const PerfilScreen({
     super.key,
@@ -43,6 +43,7 @@ class PerfilScreen extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               TextField(
+                key: const Key('campo_perfil_nombre'),
                 controller: ctrlNombre,
                 decoration: const InputDecoration(
                   labelText: 'Nombre completo',
@@ -52,6 +53,7 @@ class PerfilScreen extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               TextField(
+                key: const Key('campo_perfil_telefono'),
                 controller: ctrlTelefono,
                 decoration: const InputDecoration(
                   labelText: 'Teléfono de contacto',
@@ -61,6 +63,7 @@ class PerfilScreen extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               TextField(
+                key: const Key('campo_perfil_contrasenia'),
                 controller: ctrlContrasenia,
                 decoration: const InputDecoration(
                   labelText: 'Contraseña',
@@ -80,12 +83,14 @@ class PerfilScreen extends StatelessWidget {
             onPressed: () async {
               if (ctrlNombre.text.trim().isNotEmpty &&
                   ctrlContrasenia.text.trim().isNotEmpty) {
-                await viewModel.actualizarDatosPerfil(
+                final ok = await viewModel.actualizarDatosPerfil(
                   nombre: ctrlNombre.text,
                   telefono: ctrlTelefono.text,
                   contrasenia: ctrlContrasenia.text,
                 );
-                autenticacionViewModel.notificarPerfilActualizado();
+                if (ok) {
+                  autenticacionViewModel.notificarPerfilActualizado();
+                }
               }
               if (dialogContext.mounted) {
                 Navigator.pop(dialogContext);
@@ -116,7 +121,7 @@ class PerfilScreen extends StatelessWidget {
               key: const Key('confirmar_cerrar_sesion'),
               onPressed: () {
                 Navigator.pop(dialogContext);
-                autenticacionViewModel.cerrarSesion();
+                unawaited(autenticacionViewModel.cerrarSesion());
               },
               child: const Text('Cerrar sesión'),
             ),
@@ -149,12 +154,12 @@ class PerfilScreen extends StatelessWidget {
             ),
             const SizedBox(height: 12),
             Text(
-              usuario?.nombre ?? 'Ing. Braulio Hormigón',
+              usuario?.nombre ?? 'Usuario',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.titleLarge,
             ),
             Text(
-              usuario?.rol.etiqueta ?? 'Ingeniero Jefe de Obra',
+              usuario?.rol.etiqueta ?? '',
               textAlign: TextAlign.center,
             ),
             if (usuario != null && usuario.telefono.isNotEmpty)
@@ -166,10 +171,24 @@ class PerfilScreen extends StatelessWidget {
                   style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
+            if (viewModel.mensajeError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  viewModel.mensajeError!,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                    fontSize: 12,
+                  ),
+                ),
+              ),
             const SizedBox(height: 12),
             Center(
               child: OutlinedButton.icon(
-                onPressed: () => _mostrarDialogoEditarPerfil(context),
+                onPressed: viewModel.guardando
+                    ? null
+                    : () => _mostrarDialogoEditarPerfil(context),
                 icon: const Icon(Icons.edit_outlined, size: 18),
                 label: const Text('Modificar perfil'),
               ),

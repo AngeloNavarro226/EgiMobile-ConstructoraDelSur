@@ -224,7 +224,7 @@ Future<void> mostrarDialogoCambiarSemaforo({
 /// completas, botones para acceder al informe completo (con galería de fotos),
 /// al historial de informes pasados (con fotos desplegables) y al diálogo de
 /// estado de tareas completas y pendientes.
-class DetalleObraEnriquecidoSheet extends StatelessWidget {
+class DetalleObraEnriquecidoSheet extends StatefulWidget {
   const DetalleObraEnriquecidoSheet({
     super.key,
     required this.obraId,
@@ -237,6 +237,24 @@ class DetalleObraEnriquecidoSheet extends StatelessWidget {
   final ObrasViewModel viewModel;
   final Capacidades capacidades;
   final bool permiteEdicion;
+
+  @override
+  State<DetalleObraEnriquecidoSheet> createState() =>
+      _DetalleObraEnriquecidoSheetState();
+}
+
+class _DetalleObraEnriquecidoSheetState
+    extends State<DetalleObraEnriquecidoSheet> {
+  @override
+  void initState() {
+    super.initState();
+    unawaited(widget.viewModel.cargarReportesDeObra(widget.obraId));
+  }
+
+  ObrasViewModel get viewModel => widget.viewModel;
+  String get obraId => widget.obraId;
+  Capacidades get capacidades => widget.capacidades;
+  bool get permiteEdicion => widget.permiteEdicion;
 
   void _mostrarInformeCompleto(BuildContext context, Obra obra) {
     final ultimo = viewModel.ultimoInformeDeObra(obra.id);

@@ -8,9 +8,13 @@ import 'data/repositories/obras_repository.dart';
 import 'data/repositories/preferencias_repository.dart';
 import 'data/services/base_datos_local_service.dart';
 import 'data/services/bus_de_eventos.dart';
+import 'data/services/fuente_datos_remota.dart';
+import 'data/services/generador_ids.dart';
 import 'data/services/mapa_service.dart';
+import 'data/services/motor_sincronizacion.dart';
 import 'data/services/multimedia_service.dart';
 import 'data/services/notificaciones_sistema_service.dart';
+import 'data/services/reloj.dart';
 import 'data/services/sincronizacion_service.dart';
 import 'data/services/voz_a_texto_service.dart';
 import 'domain/models/usuario.dart';
@@ -39,27 +43,49 @@ void main() {
   const politicas = Politicas();
 
   // 2. Capa de datos: Servicios
-  final baseDatosService = BaseDatosLocalService();
+  const reloj = RelojDelSistema();
+  final generadorIds = GeneradorUuidV4();
+  final busDeEventos = BusDeEventos();
+  const fuenteDatosRemota = FuenteDatosRemotaOffline();
+  final baseDatosService = BaseDatosLocalService(reloj: reloj);
+  final motorSincronizacion = MotorSincronizacion(
+    baseDatosLocal: baseDatosService,
+    fuenteRemota: fuenteDatosRemota,
+    reloj: reloj,
+    busDeEventos: busDeEventos,
+  );
   final sincronizacionService = SincronizacionService();
-  final multimediaService = MultimediaService();
+  final multimediaService = MultimediaService(
+    reloj: reloj,
+    generadorIds: generadorIds,
+  );
   final vozATextoService = VozATextoService();
   final mapaService = MapaService();
   final notificacionesSistemaService = NotificacionesSistemaService();
-  final busDeEventos = BusDeEventos();
 
   // 3. Capa de datos: Repositorios
+  final preferenciasRepository = PreferenciasRepository();
   final autenticacionRepository = AutenticacionRepository(
     baseDatosService: baseDatosService,
+    preferenciasRepository: preferenciasRepository,
+    reloj: reloj,
+    busDeEventos: busDeEventos,
   );
   final obrasRepository = ObrasRepository(
     baseDatosService: baseDatosService,
+    reloj: reloj,
+    generadorIds: generadorIds,
+    motorSincronizacion: motorSincronizacion,
+    busDeEventos: busDeEventos,
   );
   final notificacionesRepository = NotificacionesRepository(
     baseDatosService: baseDatosService,
     notificacionesSistemaService: notificacionesSistemaService,
+    reloj: reloj,
+    generadorIds: generadorIds,
+    autenticacionRepository: autenticacionRepository,
+    busDeEventos: busDeEventos,
   );
-  final preferenciasRepository = PreferenciasRepository();
-  unawaited(preferenciasRepository.inicializar());
 
   // 4. Capa de UI: ViewModels inyectados por constructor
   final autenticacionViewModel = AutenticacionViewModel(
@@ -76,24 +102,33 @@ void main() {
     politicas: politicas,
     preferenciasRepository: preferenciasRepository,
     busDeEventos: busDeEventos,
+    reloj: reloj,
+    generadorIds: generadorIds,
   );
-  unawaited(obrasViewModel.cargar());
 
   final exportarViewModel = ExportarViewModel(
     obrasRepository: obrasRepository,
+    busDeEventos: busDeEventos,
   );
-  unawaited(exportarViewModel.actualizarDatos());
 
   final notificacionesViewModel = NotificacionesViewModel(
     repositorio: notificacionesRepository,
+    busDeEventos: busDeEventos,
   );
-  unawaited(notificacionesViewModel.cargar());
 
   final perfilViewModel = PerfilViewModel(
     autenticacionRepository: autenticacionRepository,
     preferenciasRepository: preferenciasRepository,
     sincronizacionService: sincronizacionService,
     notificacionesRepository: notificacionesRepository,
+  );
+
+  // Arranque Offline-First: cargar preferencias y restaurar sesión guardada.
+  // Los datos de obras/reportes/notificaciones se cargan tras confirmar sesión.
+  unawaited(
+    perfilViewModel.inicializarPreferencias().then((_) {
+      unawaited(autenticacionViewModel.restaurarSesion());
+    }),
   );
 
   runApp(
@@ -204,7 +239,9 @@ class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
     super.initState();
     _lifecycleListener = AppLifecycleListener(
       onResume: () {
-        unawaited(widget.obrasViewModel.cargar(forzarRecarga: true));
+        if (widget.autenticacionViewModel.tieneSesionActiva) {
+          unawaited(widget.obrasViewModel.cargar(forzarRecarga: true));
+        }
       },
     );
   }
@@ -217,8 +254,8 @@ class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
 
   @override
   Widget build(BuildContext context) {
-    final rol =
-        widget.autenticacionViewModel.usuarioActual?.rol ?? RolUsuario.ingeniero;
+    final rol = widget.autenticacionViewModel.usuarioActual?.rol.tipo ??
+        RolUsuario.ingeniero;
 
     final destinos = _construirDestinosParaRol(rol);
     final indiceSeguro = _indice >= destinos.length ? 0 : _indice;
@@ -379,7 +416,8 @@ class BarraNavegacionSuperior extends StatelessWidget {
                     children: [
                       Icon(
                         items[i].$1,
-                        color: i == indice ? colores.primary : colores.onSurface,
+                        color:
+                            i == indice ? colores.primary : colores.onSurface,
                       ),
                       const SizedBox(height: 2),
                       Text(
