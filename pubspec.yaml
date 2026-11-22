@@ -1,0 +1,34 @@
+name: constructora_del_sur
+description: "Constructora Del Sur - Gestión de Obras e Informes Diarios Offline-First"
+publish_to: 'none'
+version: 2.3.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  connectivity_plus: ^7.3.2
+  csv: ^6.0.0
+  flutter:
+    sdk: flutter
+  flutter_image_compress: ^2.5.1
+  flutter_map: ^7.0.2
+  google_maps_flutter: ^2.9.0
+  image_picker: ^1.1.2
+  latlong2: ^0.9.1
+  path: ^1.9.0
+  shared_preferences: ^2.5.6
+  speech_to_text: ^7.3.0
+  sqflite: ^2.3.3+1
+  workmanager: ^0.10.10
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/

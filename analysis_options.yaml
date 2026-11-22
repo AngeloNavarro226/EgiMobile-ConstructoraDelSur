@@ -1,0 +1,17 @@
+# Reglas recomendadas por los apuntes de Código Limpio, Refactoring y Future/Async
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    always_declare_return_types: true
+    directives_ordering: true
+    prefer_const_constructors: true
+    prefer_single_quotes: true
+    unawaited_futures: true
+
+formatter:
+  page_width: 80
+analyzer:
+  exclude:
+    - build/**
+    - android/**

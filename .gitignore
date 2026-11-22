@@ -1,0 +1,87 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.buildlog/
+.history
+.svn/
+migrate_working_dir/
+Thumbs.db
+
+# IntelliJ / Android Studio (conserva configuración compartida del proyecto, ignora estado personal)
+*.iml
+*.ipr
+*.iws
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+.idea/caches/
+.idea/libraries/
+.idea/modules.xml
+.idea/misc.xml
+
+# Flutter / Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+coverage/
+doc/api/
+pubspec.overrides.yaml
+
+# Symbolication & obfuscation
+app.*.symbols
+app.*.map.json
+
+# Android / Gradle
+android/.gradle/
+android/captures/
+android/gradlew
+android/gradlew.bat
+android/local.properties
+android/**/GeneratedPluginRegistrant.java
+android/app/debug/
+android/app/profile/
+android/app/release/
+android/key.properties
+*.jks
+*.keystore
+
+# iOS / macOS
+ios/Flutter/.last_build_id
+ios/Flutter/App.framework
+ios/Flutter/Flutter.framework
+ios/Flutter/Flutter.podspec
+ios/Flutter/Generated.xcconfig
+ios/Flutter/ephemeral/
+ios/Flutter/app.flx
+ios/Flutter/app.zip
+ios/Flutter/flutter_assets/
+ios/Pods/
+ios/.symlinks/
+ios/Runner/GeneratedPluginRegistrant.*
+macos/Flutter/ephemeral/
+macos/Pods/
+
+# Secretos, Supabase y Firebase
+.env
+.env.*
+!.env.example
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+supabase/.temp/
+
+# Descomenta estas líneas si el repositorio es público y no quieres versionar la config de Firebase:
+# android/app/google-services.json
+# ios/Runner/GoogleService-Info.plist
+# lib/firebase_options.dart
+
+# Nota: AGENTS.md, docs/PROJECT_CONTEXT.md y .agents/ se mantienen versionados para todo el equipo.
