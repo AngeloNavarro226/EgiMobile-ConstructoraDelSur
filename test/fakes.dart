@@ -57,6 +57,7 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
   final Map<String, Map<String, dynamic>> tareasRemotas = {};
   final Map<String, Map<String, dynamic>> reportesRemotos = {};
   final Map<String, Map<String, dynamic>> notificacionesRemotas = {};
+  final Map<String, Map<String, dynamic>> plantillasRemotas = {};
   final StreamController<String> _cambiosRealtime =
       StreamController<String>.broadcast();
 
@@ -132,6 +133,13 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
     _verificarRed();
     notificacionesRemotas[notificacion['id'] as String] =
         Map<String, dynamic>.from(notificacion);
+  }
+
+  @override
+  Future<void> upsertPlantilla(Map<String, dynamic> plantilla) async {
+    _verificarRed();
+    plantillasRemotas[plantilla['id'] as String] =
+        Map<String, dynamic>.from(plantilla);
   }
 
   @override

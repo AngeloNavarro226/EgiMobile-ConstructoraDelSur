@@ -10,6 +10,7 @@ class CambiosRemotos {
     this.tareas = const [],
     this.reportes = const [],
     this.notificaciones = const [],
+    this.plantillas = const [],
   });
 
   final List<Map<String, dynamic>> roles;
@@ -18,6 +19,7 @@ class CambiosRemotos {
   final List<Map<String, dynamic>> tareas;
   final List<Map<String, dynamic>> reportes;
   final List<Map<String, dynamic>> notificaciones;
+  final List<Map<String, dynamic>> plantillas;
 
   bool get estaVacio =>
       roles.isEmpty &&
@@ -25,7 +27,8 @@ class CambiosRemotos {
       obras.isEmpty &&
       tareas.isEmpty &&
       reportes.isEmpty &&
-      notificaciones.isEmpty;
+      notificaciones.isEmpty &&
+      plantillas.isEmpty;
 }
 
 /// Contrato remoto (seam) para desacoplar el motor de sincronización y los
@@ -62,6 +65,9 @@ abstract interface class FuenteDatosRemota {
 
   /// Inserta o actualiza una notificación en el servidor.
   Future<void> upsertNotificacion(Map<String, dynamic> notificacion);
+
+  /// Inserta o actualiza una plantilla del catálogo personal del ingeniero.
+  Future<void> upsertPlantilla(Map<String, dynamic> plantilla);
 
   /// Descarga los cambios modificados con posterioridad a [ultimaSyncUtc].
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc);
@@ -108,6 +114,9 @@ class FuenteDatosRemotaOffline implements FuenteDatosRemota {
 
   @override
   Future<void> upsertNotificacion(Map<String, dynamic> notificacion) async {}
+
+  @override
+  Future<void> upsertPlantilla(Map<String, dynamic> plantilla) async {}
 
   @override
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc) async =>

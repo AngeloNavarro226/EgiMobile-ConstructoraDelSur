@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../../domain/models/obra.dart';
+import '../../../domain/models/plantilla_obra.dart';
 import '../../../domain/models/reporte_diario.dart';
 import '../../../domain/models/ubicacion_obra.dart';
 import '../../../domain/models/usuario.dart';
@@ -12,11 +15,10 @@ import '../view_models/obras_view_model.dart';
 /// Vista exclusiva del Ingeniero para crear nuevas obras asignando:
 /// - Nombre de la obra
 /// - Foto de portada de la obra (cámara o galería, comprimida a 800x600 70%)
-/// - Responsable asignado (Capataz / Ingeniero)
-/// - Listado completo de tareas de la obra
-/// - Materiales que se van a utilizar (nombres, sin cantidades)
-/// - Ubicación de la obra seleccionada mediante Google Maps con transcripción
-///   del nombre del lugar desde las coordenadas
+/// - Responsable asignado (Capataces o el propio ingeniero que crea la obra)
+/// - Listado de tareas (obligatorio al menos 1) con catálogo personal rápido
+/// - Materiales a utilizar (opcional) con catálogo personal rápido
+/// - Ubicación de la obra seleccionada mediante Google Maps
 class AgregarObraScreen extends StatefulWidget {
   const AgregarObraScreen({
     super.key,
@@ -41,22 +43,18 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
   final TextEditingController _controladorObservaciones =
       TextEditingController();
 
-  final List<String> _tareas = [
-    'Replanteo y nivelación de terreno',
-    'Excavación de fundaciones',
-    'Hormigonado de estructura',
-  ];
-  final List<String> _materiales = [
-    'Hormigón H-21',
-    'Hierro nervado 12mm',
-    'Cemento Portland',
-  ];
+  final List<String> _tareas = [];
+  final List<String> _materiales = [];
 
+  bool _guardarTareaEnCatalogo = false;
+  bool _guardarMaterialEnCatalogo = false;
+  bool _responsableElegidoManualmente = false;
   String? _responsableIdSeleccionado;
   late UbicacionObra _ubicacionSeleccionada;
   EstadoObra _estado = EstadoObra.aTiempo;
   FotoComprimida? _fotoPortada;
   String? _errorNombre;
+  String? _errorTareas;
 
   @override
   void initState() {
@@ -77,22 +75,71 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
     super.dispose();
   }
 
-  void _agregarTareaALista() {
-    final texto = _controladorNuevaTarea.text.trim();
-    if (texto.isEmpty) return;
+  bool _contieneSinMayusculas(List<String> lista, String valor) {
+    final objetivo = valor.trim().toLowerCase();
+    return lista.any((e) => e.trim().toLowerCase() == objetivo);
+  }
+
+  void _alternarDesdeCatalogo(List<String> destino, String nombre) {
+    final objetivo = nombre.trim().toLowerCase();
+    final idx = destino.indexWhere((e) => e.trim().toLowerCase() == objetivo);
     setState(() {
-      _tareas.add(texto);
-      _controladorNuevaTarea.clear();
+      if (idx == -1) {
+        destino.add(nombre.trim());
+        if (identical(destino, _tareas)) {
+          _errorTareas = null;
+        }
+      } else {
+        destino.removeAt(idx);
+      }
     });
   }
 
-  void _agregarMaterialALista() {
+  Future<void> _agregarTareaALista() async {
+    final texto = _controladorNuevaTarea.text.trim();
+    if (texto.isEmpty) return;
+    final debeGuardarEnCatalogo = _guardarTareaEnCatalogo;
+    setState(() {
+      if (!_contieneSinMayusculas(_tareas, texto)) {
+        _tareas.add(texto);
+      }
+      _errorTareas = null;
+      _controladorNuevaTarea.clear();
+    });
+    if (debeGuardarEnCatalogo) {
+      await widget.viewModel.guardarPlantillaPersonal(
+        tipo: TipoPlantilla.tarea,
+        nombre: texto,
+      );
+    }
+  }
+
+  Future<void> _agregarMaterialALista() async {
     final texto = _controladorNuevoMaterial.text.trim();
     if (texto.isEmpty) return;
+    final debeGuardarEnCatalogo = _guardarMaterialEnCatalogo;
     setState(() {
-      _materiales.add(texto);
+      if (!_contieneSinMayusculas(_materiales, texto)) {
+        _materiales.add(texto);
+      }
       _controladorNuevoMaterial.clear();
     });
+    if (debeGuardarEnCatalogo) {
+      await widget.viewModel.guardarPlantillaPersonal(
+        tipo: TipoPlantilla.material,
+        nombre: texto,
+      );
+    }
+  }
+
+  Future<void> _mostrarGestionCatalogo(TipoPlantilla tipo) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => _DialogoGestionCatalogo(
+        tipo: tipo,
+        viewModel: widget.viewModel,
+      ),
+    );
   }
 
   Future<void> _seleccionarFotoPortada({required bool desdeCamara}) async {
@@ -120,39 +167,50 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
     }
   }
 
-  Usuario _resolverResponsableActual(List<Usuario> disponibles) {
-    for (final u in disponibles) {
-      if (u.id == _responsableIdSeleccionado) {
-        return u;
+  Usuario? _resolverResponsableActual(List<Usuario> disponibles) {
+    if (disponibles.isEmpty) return null;
+    if (_responsableElegidoManualmente && _responsableIdSeleccionado != null) {
+      for (final u in disponibles) {
+        if (u.id == _responsableIdSeleccionado) {
+          return u;
+        }
       }
     }
-    if (disponibles.isNotEmpty) {
-      return disponibles.first;
-    }
-    return const Usuario(
-      id: 'u_capataz',
-      username: 'capataz',
-      nombre: 'Carlos Méndez (Capataz)',
-      contrasenia: '1234',
-      rol: Rol.capataz,
-    );
+    return disponibles.first;
   }
 
   Future<void> _guardarObra() async {
-    if (_controladorNombre.text.trim().isEmpty) {
-      setState(() => _errorNombre = 'Ingresá el nombre de la obra');
+    final nombreVacio = _controladorNombre.text.trim().isEmpty;
+    final sinTareas = _tareas.isEmpty;
+    if (nombreVacio || sinTareas) {
+      setState(() {
+        _errorNombre = nombreVacio ? 'Ingresá el nombre de la obra' : null;
+        _errorTareas = sinTareas
+            ? 'Agregá al menos una tarea para poder crear la obra'
+            : null;
+      });
       return;
     }
+
     final disponibles = widget.viewModel.responsablesDisponibles;
     final responsable = _resolverResponsableActual(disponibles);
+    if (responsable == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Todavía no se cargaron los responsables. Sincronizá e intentá de nuevo.',
+          ),
+        ),
+      );
+      return;
+    }
 
+    final nombreCreado = _controladorNombre.text.trim();
     await widget.viewModel.crearNuevaObra(
-      nombre: _controladorNombre.text,
+      nombre: nombreCreado,
       responsable: responsable,
-      nombresTareas:
-          _tareas.isEmpty ? ['Tarea inicial de obra'] : List.from(_tareas),
-      materiales:
-          _materiales.isEmpty ? ['Cemento Portland'] : List.from(_materiales),
+      nombresTareas: List.from(_tareas),
+      materiales: List.from(_materiales),
       ubicacion: _ubicacionSeleccionada,
       estadoInicial: _estado,
       observaciones: _controladorObservaciones.text,
@@ -163,16 +221,24 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text('"${_controladorNombre.text.trim()}" creada en SQLite'),
+        content: Text('"$nombreCreado" creada y en cola de sincronización'),
       ),
     );
 
     _controladorNombre.clear();
+    _controladorNuevaTarea.clear();
+    _controladorNuevoMaterial.clear();
     _controladorObservaciones.clear();
     setState(() {
+      _tareas.clear();
+      _materiales.clear();
       _errorNombre = null;
+      _errorTareas = null;
       _estado = EstadoObra.aTiempo;
       _fotoPortada = null;
+      _responsableElegidoManualmente = false;
+      _responsableIdSeleccionado =
+          disponibles.isNotEmpty ? disponibles.first.id : null;
     });
 
     widget.onGuardado();
@@ -184,11 +250,11 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
       listenable: widget.viewModel,
       builder: (context, _) {
         final responsables = widget.viewModel.responsablesDisponibles;
-        final idValido = responsables.any(
-          (u) => u.id == _responsableIdSeleccionado,
-        )
-            ? _responsableIdSeleccionado
-            : (responsables.isNotEmpty ? responsables.first.id : null);
+        final usuarioActual = widget.viewModel.usuarioActual;
+        final responsableActivo = _resolverResponsableActual(responsables);
+        final idValido = responsableActivo?.id;
+        final tareasGuardadas = widget.viewModel.tareasGuardadas;
+        final materialesGuardados = widget.viewModel.materialesGuardados;
 
         return ListView(
           padding: const EdgeInsets.all(16),
@@ -251,7 +317,9 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
             const SizedBox(height: 16),
             if (responsables.isNotEmpty)
               DropdownButtonFormField<String>(
-                key: ValueKey(idValido),
+                key: ValueKey(
+                  '${idValido}_${responsables.map((r) => r.id).join(',')}',
+                ),
                 initialValue: idValido,
                 isExpanded: true,
                 decoration: const InputDecoration(
@@ -264,7 +332,9 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
                     DropdownMenuItem<String>(
                       value: u.id,
                       child: Text(
-                        '${u.nombre} (${u.rol.etiqueta})',
+                        u.id == usuarioActual?.id
+                            ? '${u.nombre} (Yo · ${u.rol.etiqueta})'
+                            : '${u.nombre} (${u.rol.etiqueta})',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -272,9 +342,20 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
                 ],
                 onChanged: (nuevoId) {
                   if (nuevoId != null) {
-                    setState(() => _responsableIdSeleccionado = nuevoId);
+                    setState(() {
+                      _responsableElegidoManualmente = true;
+                      _responsableIdSeleccionado = nuevoId;
+                    });
                   }
                 },
+              )
+            else
+              const Card(
+                margin: EdgeInsets.zero,
+                child: ListTile(
+                  leading: Icon(Icons.sync),
+                  title: Text('Cargando capataces y responsables...'),
+                ),
               ),
             const SizedBox(height: 16),
             Card(
@@ -291,56 +372,118 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
               ),
             ),
             const SizedBox(height: 16),
-            const Text(
-              'Listado de tareas de la obra',
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  'Listado de tareas de la obra *',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                TextButton.icon(
+                  onPressed: () => _mostrarGestionCatalogo(TipoPlantilla.tarea),
+                  icon: const Icon(Icons.bookmarks_outlined, size: 16),
+                  label: const Text('Mis tareas guardadas'),
+                ),
+              ],
             ),
-            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
                   child: TextField(
                     controller: _controladorNuevaTarea,
-                    onSubmitted: (_) => _agregarTareaALista(),
-                    decoration: const InputDecoration(
+                    onSubmitted: (_) => unawaited(_agregarTareaALista()),
+                    decoration: InputDecoration(
                       labelText: 'Añadir tarea al plan de la obra',
-                      prefixIcon: Icon(Icons.construction),
-                      border: OutlineInputBorder(),
+                      prefixIcon: const Icon(Icons.construction),
+                      border: const OutlineInputBorder(),
+                      errorText: _errorTareas,
                     ),
                   ),
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
-                  onPressed: _agregarTareaALista,
+                  onPressed: () => unawaited(_agregarTareaALista()),
                   icon: const Icon(Icons.add),
                   label: const Text('Agregar'),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: _guardarTareaEnCatalogo,
+              onChanged: (v) =>
+                  setState(() => _guardarTareaEnCatalogo = v ?? false),
+              title: const Text(
+                'Guardar también en mi catálogo para futuras obras',
+                style: TextStyle(fontSize: 13),
+              ),
+            ),
+            if (tareasGuardadas.isNotEmpty) ...[
+              Text(
+                'Tocar para agregar rápido desde tus guardadas:',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  for (final plantilla in tareasGuardadas)
+                    FilterChip(
+                      label: Text(plantilla.nombre),
+                      selected: _contieneSinMayusculas(
+                        _tareas,
+                        plantilla.nombre,
+                      ),
+                      onSelected: (_) =>
+                          _alternarDesdeCatalogo(_tareas, plantilla.nombre),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+            ],
+            if (_tareas.isNotEmpty) ...[
+              Text(
+                'Tareas seleccionadas para esta obra (${_tareas.length}):',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (var i = 0; i < _tareas.length; i++)
+                    InputChip(
+                      label: Text(_tareas[i]),
+                      onDeleted: () => setState(() => _tareas.removeAt(i)),
+                    ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                for (var i = 0; i < _tareas.length; i++)
-                  InputChip(
-                    label: Text(_tareas[i]),
-                    onDeleted: () => setState(() => _tareas.removeAt(i)),
-                  ),
+                const Text(
+                  'Materiales a utilizar (opcional)',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+                TextButton.icon(
+                  onPressed: () =>
+                      _mostrarGestionCatalogo(TipoPlantilla.material),
+                  icon: const Icon(Icons.bookmarks_outlined, size: 16),
+                  label: const Text('Mis materiales guardados'),
+                ),
               ],
             ),
-            const SizedBox(height: 16),
-            const Text(
-              'Materiales a utilizar (nombres)',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
             Row(
               children: [
                 Expanded(
                   child: TextField(
                     controller: _controladorNuevoMaterial,
-                    onSubmitted: (_) => _agregarMaterialALista(),
+                    onSubmitted: (_) => unawaited(_agregarMaterialALista()),
                     decoration: const InputDecoration(
                       labelText: 'Nombre del material (ej. Hormigón H-21)',
                       prefixIcon: Icon(Icons.inventory_2_outlined),
@@ -350,24 +493,66 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
                 ),
                 const SizedBox(width: 8),
                 FilledButton.tonalIcon(
-                  onPressed: _agregarMaterialALista,
+                  onPressed: () => unawaited(_agregarMaterialALista()),
                   icon: const Icon(Icons.add),
                   label: const Text('Agregar'),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: [
-                for (var i = 0; i < _materiales.length; i++)
-                  InputChip(
-                    label: Text(_materiales[i]),
-                    onDeleted: () => setState(() => _materiales.removeAt(i)),
-                  ),
-              ],
+            CheckboxListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              controlAffinity: ListTileControlAffinity.leading,
+              value: _guardarMaterialEnCatalogo,
+              onChanged: (v) =>
+                  setState(() => _guardarMaterialEnCatalogo = v ?? false),
+              title: const Text(
+                'Guardar también en mi catálogo para futuras obras',
+                style: TextStyle(fontSize: 13),
+              ),
             ),
+            if (materialesGuardados.isNotEmpty) ...[
+              Text(
+                'Tocar para agregar rápido desde tus guardados:',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  for (final plantilla in materialesGuardados)
+                    FilterChip(
+                      label: Text(plantilla.nombre),
+                      selected: _contieneSinMayusculas(
+                        _materiales,
+                        plantilla.nombre,
+                      ),
+                      onSelected: (_) =>
+                          _alternarDesdeCatalogo(_materiales, plantilla.nombre),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+            ],
+            if (_materiales.isNotEmpty) ...[
+              Text(
+                'Materiales seleccionados para esta obra (${_materiales.length}):',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (var i = 0; i < _materiales.length; i++)
+                    InputChip(
+                      label: Text(_materiales[i]),
+                      onDeleted: () => setState(() => _materiales.removeAt(i)),
+                    ),
+                ],
+              ),
+            ],
             const SizedBox(height: 16),
             const Text(
               'Estado inicial del semáforo',
@@ -404,6 +589,132 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
               onPressed: _guardarObra,
               icon: const Icon(Icons.save),
               label: const Text('Guardar obra'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _DialogoGestionCatalogo extends StatefulWidget {
+  const _DialogoGestionCatalogo({
+    required this.tipo,
+    required this.viewModel,
+  });
+
+  final TipoPlantilla tipo;
+  final ObrasViewModel viewModel;
+
+  @override
+  State<_DialogoGestionCatalogo> createState() =>
+      _DialogoGestionCatalogoState();
+}
+
+class _DialogoGestionCatalogoState extends State<_DialogoGestionCatalogo> {
+  final TextEditingController _controladorNuevo = TextEditingController();
+
+  @override
+  void dispose() {
+    _controladorNuevo.dispose();
+    super.dispose();
+  }
+
+  Future<void> _guardarNuevo() async {
+    final texto = _controladorNuevo.text.trim();
+    if (texto.isEmpty) return;
+    _controladorNuevo.clear();
+    await widget.viewModel.guardarPlantillaPersonal(
+      tipo: widget.tipo,
+      nombre: texto,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final esTarea = widget.tipo == TipoPlantilla.tarea;
+    final titulo = esTarea
+        ? 'Gestionar tareas guardadas'
+        : 'Gestionar materiales guardados';
+
+    return ListenableBuilder(
+      listenable: widget.viewModel,
+      builder: (context, _) {
+        final items = esTarea
+            ? widget.viewModel.tareasGuardadas
+            : widget.viewModel.materialesGuardados;
+        return AlertDialog(
+          title: Text(titulo),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _controladorNuevo,
+                        textInputAction: TextInputAction.done,
+                        onSubmitted: (_) => unawaited(_guardarNuevo()),
+                        decoration: InputDecoration(
+                          labelText: esTarea
+                              ? 'Nueva tarea frecuente'
+                              : 'Nuevo material frecuente',
+                          border: const OutlineInputBorder(),
+                          isDense: true,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton.tonal(
+                      onPressed: () => unawaited(_guardarNuevo()),
+                      child: const Text('Guardar'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                if (items.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 12),
+                    child: Text(
+                      'Todavía no guardaste elementos en tu catálogo.',
+                    ),
+                  )
+                else
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 280),
+                    child: ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: items.length,
+                      itemBuilder: (_, index) {
+                        final plantilla = items[index];
+                        return ListTile(
+                          dense: true,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(plantilla.nombre),
+                          trailing: IconButton(
+                            tooltip: 'Quitar de mi catálogo',
+                            icon: const Icon(Icons.delete_outline, size: 20),
+                            onPressed: () {
+                              unawaited(
+                                widget.viewModel
+                                    .eliminarPlantillaPersonal(plantilla.id),
+                              );
+                            },
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Listo'),
             ),
           ],
         );

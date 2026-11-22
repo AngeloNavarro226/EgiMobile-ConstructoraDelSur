@@ -64,16 +64,27 @@ class AutenticacionRepository {
   }
 
   /// Devuelve únicamente los usuarios que pueden ser asignados como responsables
-  /// de una obra (capataces e ingenieros).
-  Future<List<Usuario>> obtenerResponsablesDisponibles() async {
-    final todos = await obtenerUsuarios();
-    return todos
-        .where(
-          (u) =>
-              u.rol.tipo == RolUsuario.capataz ||
-              u.rol.tipo == RolUsuario.ingeniero,
-        )
-        .toList();
+  /// de una obra nueva: todos los capataces y (si está logueado como ingeniero)
+  /// el ingeniero actual que crea la obra — nunca otros ingenieros.
+  Future<List<Usuario>> obtenerResponsablesDisponibles({
+    bool forzarRecarga = false,
+  }) async {
+    final todos = await obtenerUsuarios(forzarRecarga: forzarRecarga);
+    final actual = _usuarioActual;
+    final filtrados = todos.where((u) {
+      if (u.rol.tipo == RolUsuario.capataz) return true;
+      if (u.rol.tipo == RolUsuario.ingeniero) {
+        return actual == null || u.id == actual.id;
+      }
+      return false;
+    }).toList()
+      ..sort((a, b) {
+        final aEsCapataz = a.rol.tipo == RolUsuario.capataz ? 0 : 1;
+        final bEsCapataz = b.rol.tipo == RolUsuario.capataz ? 0 : 1;
+        if (aEsCapataz != bEsCapataz) return aEsCapataz.compareTo(bEsCapataz);
+        return a.nombre.toLowerCase().compareTo(b.nombre.toLowerCase());
+      });
+    return filtrados;
   }
 
   /// Restaura la sesión persistida (Supabase Auth + caché SQLite) para operar

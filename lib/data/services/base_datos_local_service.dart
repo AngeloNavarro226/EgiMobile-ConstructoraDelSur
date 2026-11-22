@@ -8,7 +8,7 @@ import 'reloj.dart';
 ///
 /// Características clave:
 /// - Activa `PRAGMA foreign_keys = ON` en cada conexión.
-/// - Mantiene migraciones incrementales en `onUpgrade` (`version: 2`) sin
+/// - Mantiene migraciones incrementales en `onUpgrade` (`version: 4`) sin
 ///   perder datos `pending` locales.
 /// - Soporta consultas filtradas/paginadas, escrituras granulares por tarea y
 ///   metadatos de sincronización (`updated_at` UTC, `sync_status`, `deleted_at`,
@@ -28,7 +28,7 @@ class BaseDatosLocalService {
 
   static const nombreArchivoDb = 'constructora_del_sur_v4.db';
   static const nombreArchivoSupabase = 'constructora_del_sur_supabase.db';
-  static const versionEsquema = 2;
+  static const versionEsquema = 4;
 
   final DatabaseFactory? _fabricaBaseDatos;
   final Reloj _reloj;
@@ -50,6 +50,7 @@ class BaseDatosLocalService {
   final List<Map<String, dynamic>> _reporteMaterialesMemoria = [];
   final List<Map<String, dynamic>> _reporteFotosMemoria = [];
   final List<Map<String, dynamic>> _notificacionesMemoria = [];
+  final List<Map<String, dynamic>> _plantillasMemoria = [];
   final List<Map<String, dynamic>> _colaSyncMemoria = [];
   String? _ultimaSyncUtcMemoria;
   Map<String, dynamic> _configRecordatorioMemoria = {
@@ -122,6 +123,13 @@ class BaseDatosLocalService {
               if (oldVersion < 2) {
                 await _migrarV1AV2(db);
               }
+              if (oldVersion < 3) {
+                await _migrarV2AV3(db);
+              }
+              if (oldVersion < 4) {
+                await _migrarV3AV4(db);
+              }
+              await _crearIndicesSql(db);
             },
           ),
         );
@@ -173,6 +181,8 @@ class BaseDatosLocalService {
         estado_semaforo TEXT NOT NULL,
         fecha_ultimo_reporte TEXT NOT NULL,
         responsable_id TEXT NOT NULL,
+        ingeniero_id TEXT,
+        tarea_actual_id TEXT,
         ubicacion_latitud REAL NOT NULL,
         ubicacion_longitud REAL NOT NULL,
         ubicacion_direccion TEXT NOT NULL,
@@ -186,7 +196,13 @@ class BaseDatosLocalService {
         deleted_at TEXT,
         FOREIGN KEY (responsable_id) REFERENCES usuarios(id)
           ON UPDATE CASCADE
-          ON DELETE RESTRICT
+          ON DELETE RESTRICT,
+        FOREIGN KEY (ingeniero_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
+          ON DELETE SET NULL,
+        FOREIGN KEY (tarea_actual_id) REFERENCES tareas_obra(id)
+          ON UPDATE CASCADE
+          ON DELETE SET NULL
       )
     ''');
 
@@ -313,6 +329,21 @@ class BaseDatosLocalService {
         creado_en TEXT NOT NULL
       )
     ''');
+
+    await db.execute('''
+      CREATE TABLE catalogo_plantillas (
+        id TEXT PRIMARY KEY,
+        usuario_id TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        nombre TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        deleted_at TEXT,
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
+      )
+    ''');
   }
 
   Future<void> _crearIndicesSql(Database db) async {
@@ -322,6 +353,14 @@ class BaseDatosLocalService {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_obras_responsable_id '
       'ON obras(responsable_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_obras_ingeniero_id '
+      'ON obras(ingeniero_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_obras_tarea_actual_id '
+      'ON obras(tarea_actual_id)',
     );
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_obras_sync_status ON obras(sync_status)',
@@ -365,6 +404,14 @@ class BaseDatosLocalService {
     await db.execute(
       'CREATE INDEX IF NOT EXISTS idx_cola_sync_entidad '
       'ON cola_sincronizacion(entidad, entidad_id)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_catalogo_plantillas_usuario_tipo '
+      'ON catalogo_plantillas(usuario_id, tipo)',
+    );
+    await db.execute(
+      'CREATE INDEX IF NOT EXISTS idx_catalogo_plantillas_sync_status '
+      'ON catalogo_plantillas(sync_status)',
     );
   }
 
@@ -454,10 +501,42 @@ class BaseDatosLocalService {
           )
         ''');
       });
-      await _crearIndicesSql(db);
     } finally {
       await db.execute('PRAGMA foreign_keys = ON');
     }
+  }
+
+  /// Migración incremental v2 -> v3: agrega `obras.ingeniero_id` (FK opcional a
+  /// `usuarios.id`) para vincular al ingeniero supervisor/creador de cada obra.
+  Future<void> _migrarV2AV3(Database db) async {
+    await db.execute(
+      'ALTER TABLE obras ADD COLUMN ingeniero_id TEXT '
+      'REFERENCES usuarios(id) ON UPDATE CASCADE ON DELETE SET NULL',
+    );
+  }
+
+  /// Migración incremental v3 -> v4: agrega `obras.tarea_actual_id` y la tabla
+  /// `catalogo_plantillas` (catálogo individual por ingeniero de tareas y
+  /// materiales frecuentes).
+  Future<void> _migrarV3AV4(Database db) async {
+    await db.execute(
+      'ALTER TABLE obras ADD COLUMN tarea_actual_id TEXT '
+      'REFERENCES tareas_obra(id) ON UPDATE CASCADE ON DELETE SET NULL',
+    );
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS catalogo_plantillas (
+        id TEXT PRIMARY KEY,
+        usuario_id TEXT NOT NULL,
+        tipo TEXT NOT NULL,
+        nombre TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        deleted_at TEXT,
+        FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
+      )
+    ''');
   }
 
   Future<void> _insertarCatalogoRolesSql(Database db) async {
@@ -502,6 +581,9 @@ class BaseDatosLocalService {
     for (final notificacion in _semillasNotificaciones()) {
       await db.insert('notificaciones', notificacion);
     }
+    for (final plantilla in _semillasPlantillas()) {
+      await db.insert('catalogo_plantillas', plantilla);
+    }
   }
 
   void _cargarSemillasEnMemoria() {
@@ -529,6 +611,9 @@ class BaseDatosLocalService {
     _notificacionesMemoria
       ..clear()
       ..addAll(_semillasNotificaciones());
+    _plantillasMemoria
+      ..clear()
+      ..addAll(_semillasPlantillas());
   }
 
   /// Obtiene todos los registros crudos de la tabla `roles`.
@@ -678,6 +763,9 @@ class BaseDatosLocalService {
         final obraId = obra['id'] as String;
         final responsable =
             _buscarUsuarioEnMemoria(obra['responsable_id'] as String);
+        final ingenieroId = obra['ingeniero_id'] as String?;
+        final ingeniero =
+            ingenieroId != null ? _buscarUsuarioEnMemoria(ingenieroId) : null;
         final tareas = _tareasObraMemoria
             .where((t) => t['obra_id'] == obraId)
             .toList()
@@ -690,6 +778,7 @@ class BaseDatosLocalService {
         return {
           ...obra,
           'responsable_nombre': responsable?['nombre'] ?? 'Capataz',
+          'ingeniero_nombre': ingeniero?['nombre'],
           'tareas': tareas.map(Map<String, dynamic>.from).toList(),
           'materiales': materiales,
         };
@@ -722,6 +811,9 @@ class BaseDatosLocalService {
         o.fecha_ultimo_reporte,
         o.responsable_id,
         u.nombre AS responsable_nombre,
+        o.ingeniero_id,
+        ing.nombre AS ingeniero_nombre,
+        o.tarea_actual_id,
         o.ubicacion_latitud,
         o.ubicacion_longitud,
         o.ubicacion_direccion,
@@ -735,6 +827,7 @@ class BaseDatosLocalService {
         o.deleted_at
       FROM obras o
       INNER JOIN usuarios u ON u.id = o.responsable_id
+      LEFT JOIN usuarios ing ON ing.id = o.ingeniero_id
       WHERE ${whereClausulas.join(' AND ')}
       ${paginacion.toString()}
       ''',
@@ -805,6 +898,12 @@ class BaseDatosLocalService {
           'Violación de FK: responsable_id "$responsableId" no existe.',
         );
       }
+      final ingenieroId = obra['ingeniero_id'] as String?;
+      if (ingenieroId != null && _buscarUsuarioEnMemoria(ingenieroId) == null) {
+        throw StateError(
+          'Violación de FK: ingeniero_id "$ingenieroId" no existe.',
+        );
+      }
       final indice = _obrasMemoria.indexWhere((o) => o['id'] == id);
       if (indice == -1) {
         _obrasMemoria.add(Map<String, dynamic>.from(filaObra));
@@ -821,19 +920,33 @@ class BaseDatosLocalService {
     }
 
     await _db!.transaction((txn) async {
+      final tareaActualId = filaObra['tarea_actual_id'] as String?;
+      final filaSinTareaActual = Map<String, dynamic>.from(filaObra)
+        ..['tarea_actual_id'] = null;
+
       final actualizados = await txn.update(
         'obras',
-        filaObra,
+        filaSinTareaActual,
         where: 'id = ?',
         whereArgs: [id],
       );
       if (actualizados == 0) {
-        await txn.insert('obras', filaObra);
+        await txn.insert('obras', filaSinTareaActual);
       }
 
       await txn.delete('tareas_obra', where: 'obra_id = ?', whereArgs: [id]);
       for (final tarea in tareas) {
         await txn.insert('tareas_obra', tarea);
+      }
+
+      if (tareaActualId != null &&
+          tareas.any((t) => t['id'] == tareaActualId)) {
+        await txn.update(
+          'obras',
+          {'tarea_actual_id': tareaActualId},
+          where: 'id = ?',
+          whereArgs: [id],
+        );
       }
 
       await txn.delete(
@@ -848,6 +961,188 @@ class BaseDatosLocalService {
         });
       }
     });
+  }
+
+  /// Actualiza la tarea actual elegida explícitamente para una obra sin
+  /// reescribir tareas ni materiales.
+  Future<void> actualizarTareaActualObraCruda({
+    required String obraId,
+    required String? tareaActualId,
+    required DateTime updatedAtUtc,
+  }) async {
+    await inicializar();
+    final valores = <String, dynamic>{
+      'tarea_actual_id': tareaActualId,
+      'updated_at': updatedAtUtc.toUtc().toIso8601String(),
+      'sync_status': 'pending',
+    };
+    if (_usarMemoriaFallback) {
+      final idx = _obrasMemoria.indexWhere((o) => o['id'] == obraId);
+      if (idx != -1) {
+        _obrasMemoria[idx] = {..._obrasMemoria[idx], ...valores};
+      }
+      return;
+    }
+    await _db!.update('obras', valores, where: 'id = ?', whereArgs: [obraId]);
+  }
+
+  /// Agrega un material nuevo a una obra en curso evitando duplicados y marca
+  /// la obra como `pending` para que se sincronice con Supabase.
+  Future<void> agregarMaterialAObraCruda({
+    required String obraId,
+    required String nombreMaterial,
+    required DateTime updatedAtUtc,
+  }) async {
+    await inicializar();
+    final limpio = nombreMaterial.trim();
+    if (limpio.isEmpty) return;
+    final limpioLower = limpio.toLowerCase();
+    final ahoraIso = updatedAtUtc.toUtc().toIso8601String();
+
+    if (_usarMemoriaFallback) {
+      if (_buscarObraEnMemoria(obraId) == null) {
+        throw StateError('Violación de FK: obra_id "$obraId" no existe.');
+      }
+      final yaExiste = _obraMaterialesMemoria.any(
+        (m) =>
+            m['obra_id'] == obraId &&
+            (m['nombre'] as String).trim().toLowerCase() == limpioLower,
+      );
+      if (!yaExiste) {
+        _obraMaterialesMemoria.add({'obra_id': obraId, 'nombre': limpio});
+      }
+      final idx = _obrasMemoria.indexWhere((o) => o['id'] == obraId);
+      if (idx != -1) {
+        _obrasMemoria[idx] = {
+          ..._obrasMemoria[idx],
+          'updated_at': ahoraIso,
+          'sync_status': 'pending',
+        };
+      }
+      return;
+    }
+
+    await _db!.transaction((txn) async {
+      final existentes = await txn.query(
+        'obra_materiales',
+        columns: ['nombre'],
+        where: 'obra_id = ?',
+        whereArgs: [obraId],
+      );
+      final yaExiste = existentes.any(
+        (m) => (m['nombre'] as String).trim().toLowerCase() == limpioLower,
+      );
+      if (!yaExiste) {
+        await txn.insert('obra_materiales', {
+          'obra_id': obraId,
+          'nombre': limpio,
+        });
+      }
+      await txn.update(
+        'obras',
+        {'updated_at': ahoraIso, 'sync_status': 'pending'},
+        where: 'id = ?',
+        whereArgs: [obraId],
+      );
+    });
+  }
+
+  /// Obtiene las plantillas activas (tareas/materiales frecuentes) del usuario.
+  Future<List<Map<String, dynamic>>> obtenerPlantillasCrudas({
+    required String usuarioId,
+    String? tipo,
+  }) async {
+    await inicializar();
+    if (_usarMemoriaFallback) {
+      final filtradas = _plantillasMemoria.where((p) {
+        if (p['deleted_at'] != null) return false;
+        if (p['usuario_id'] != usuarioId) return false;
+        if (tipo != null && p['tipo'] != tipo) return false;
+        return true;
+      }).toList()
+        ..sort(
+          (a, b) => (a['nombre'] as String)
+              .toLowerCase()
+              .compareTo((b['nombre'] as String).toLowerCase()),
+        );
+      return filtradas.map(Map<String, dynamic>.from).toList();
+    }
+
+    final whereClausulas = <String>['usuario_id = ?', 'deleted_at IS NULL'];
+    final args = <Object?>[usuarioId];
+    if (tipo != null) {
+      whereClausulas.add('tipo = ?');
+      args.add(tipo);
+    }
+    return _db!.query(
+      'catalogo_plantillas',
+      where: whereClausulas.join(' AND '),
+      whereArgs: args,
+      orderBy: 'LOWER(nombre) ASC',
+    );
+  }
+
+  /// Inserta o actualiza una plantilla en `catalogo_plantillas`.
+  Future<void> guardarPlantillaCruda(Map<String, dynamic> plantilla) async {
+    await inicializar();
+    final id = plantilla['id'] as String;
+    final usuarioId = plantilla['usuario_id'] as String;
+    final fila = {
+      'updated_at': _ahoraUtcIso(),
+      'sync_status': 'pending',
+      ...plantilla,
+    };
+
+    if (_usarMemoriaFallback) {
+      if (_buscarUsuarioEnMemoria(usuarioId) == null) {
+        throw StateError('Violación de FK: usuario_id "$usuarioId" no existe.');
+      }
+      final idx = _plantillasMemoria.indexWhere((p) => p['id'] == id);
+      if (idx == -1) {
+        _plantillasMemoria.add(Map<String, dynamic>.from(fila));
+      } else {
+        _plantillasMemoria[idx] = Map<String, dynamic>.from(fila);
+      }
+      return;
+    }
+
+    final actualizados = await _db!.update(
+      'catalogo_plantillas',
+      fila,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+    if (actualizados == 0) {
+      await _db!.insert('catalogo_plantillas', fila);
+    }
+  }
+
+  /// Marca una plantilla como eliminada lógicamente (`deleted_at`) para
+  /// sincronizar su borrado con Supabase sin afectar obras ya creadas.
+  Future<void> eliminarPlantillaCruda({
+    required String id,
+    required DateTime deletedAtUtc,
+  }) async {
+    await inicializar();
+    final iso = deletedAtUtc.toUtc().toIso8601String();
+    final valores = {
+      'deleted_at': iso,
+      'updated_at': iso,
+      'sync_status': 'pending',
+    };
+    if (_usarMemoriaFallback) {
+      final idx = _plantillasMemoria.indexWhere((p) => p['id'] == id);
+      if (idx != -1) {
+        _plantillasMemoria[idx] = {..._plantillasMemoria[idx], ...valores};
+      }
+      return;
+    }
+    await _db!.update(
+      'catalogo_plantillas',
+      valores,
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   /// Actualiza únicamente el semáforo y la fecha del último reporte de una obra
@@ -1596,6 +1891,7 @@ class BaseDatosLocalService {
         'tareas_obra' => _tareasObraMemoria,
         'reportes_diarios' => _reportesMemoria,
         'notificaciones' => _notificacionesMemoria,
+        'catalogo_plantillas' => _plantillasMemoria,
         _ => throw ArgumentError('Tabla no soportada para sync: $tabla'),
       };
 
@@ -1685,6 +1981,7 @@ class BaseDatosLocalService {
           'fecha_ultimo_reporte':
               DateTime.utc(2026, 9, 18, 16, 30).toIso8601String(),
           'responsable_id': 'u_capataz',
+          'ingeniero_id': 'u_ingeniero',
           'ubicacion_latitud': -32.8489,
           'ubicacion_longitud': -68.8392,
           'ubicacion_direccion': 'Av. San Martín 1450, Las Heras, Mendoza',
@@ -1705,6 +2002,7 @@ class BaseDatosLocalService {
           'fecha_ultimo_reporte':
               DateTime.utc(2026, 9, 18, 17, 15).toIso8601String(),
           'responsable_id': 'u_capataz',
+          'ingeniero_id': 'u_ingeniero',
           'ubicacion_latitud': -32.8895,
           'ubicacion_longitud': -68.8458,
           'ubicacion_direccion': 'Av. Belgrano 820, Ciudad de Mendoza',
@@ -1725,6 +2023,7 @@ class BaseDatosLocalService {
           'fecha_ultimo_reporte':
               DateTime.utc(2026, 9, 17, 18, 0).toIso8601String(),
           'responsable_id': 'u_capataz',
+          'ingeniero_id': 'u_ingeniero',
           'ubicacion_latitud': -32.9254,
           'ubicacion_longitud': -68.8130,
           'ubicacion_direccion':
@@ -1745,6 +2044,7 @@ class BaseDatosLocalService {
           'fecha_ultimo_reporte':
               DateTime.utc(2026, 9, 17, 15, 20).toIso8601String(),
           'responsable_id': 'u_capataz',
+          'ingeniero_id': 'u_ingeniero',
           'ubicacion_latitud': -32.8930,
           'ubicacion_longitud': -68.8615,
           'ubicacion_direccion': 'Av. Emilio Civit 410, Ciudad de Mendoza',
@@ -1765,6 +2065,7 @@ class BaseDatosLocalService {
           'fecha_ultimo_reporte':
               DateTime.utc(2026, 9, 18, 14, 10).toIso8601String(),
           'responsable_id': 'u_ingeniero',
+          'ingeniero_id': 'u_ingeniero',
           'ubicacion_latitud': -32.9612,
           'ubicacion_longitud': -68.8540,
           'ubicacion_direccion':
@@ -1785,6 +2086,7 @@ class BaseDatosLocalService {
           'fecha_ultimo_reporte':
               DateTime.utc(2026, 9, 19, 11, 45).toIso8601String(),
           'responsable_id': 'u_ingeniero',
+          'ingeniero_id': 'u_ingeniero',
           'ubicacion_latitud': -32.8150,
           'ubicacion_longitud': -68.8210,
           'ubicacion_direccion': 'Ruta Nacional 40 Km 3295, Las Heras, Mendoza',
@@ -1993,4 +2295,27 @@ class BaseDatosLocalService {
           'sync_status': 'synced',
         },
       ];
+
+  /// Catálogo inicial de tareas y materiales frecuentes para el ingeniero
+  /// en modo demo/test (sugerencias opcionales, nunca precargadas en la obra).
+  List<Map<String, dynamic>> _semillasPlantillas() {
+    final ts = DateTime.utc(2026, 9, 18).toIso8601String();
+    Map<String, dynamic> item(String id, String tipo, String nombre) => {
+          'id': id,
+          'usuario_id': 'u_ingeniero',
+          'tipo': tipo,
+          'nombre': nombre,
+          'updated_at': ts,
+          'sync_status': 'synced',
+          'deleted_at': null,
+        };
+    return [
+      item('plt_t1', 'tarea', 'Replanteo y nivelación de terreno'),
+      item('plt_t2', 'tarea', 'Excavación de fundaciones'),
+      item('plt_t3', 'tarea', 'Hormigonado de estructura'),
+      item('plt_m1', 'material', 'Hormigón H-21'),
+      item('plt_m2', 'material', 'Hierro nervado 12mm'),
+      item('plt_m3', 'material', 'Cemento Portland'),
+    ];
+  }
 }

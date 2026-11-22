@@ -13,6 +13,7 @@ import '../../../data/services/sincronizacion_service.dart';
 import '../../../data/services/voz_a_texto_service.dart';
 import '../../../domain/models/evento_de_app.dart';
 import '../../../domain/models/obra.dart';
+import '../../../domain/models/plantilla_obra.dart';
 import '../../../domain/models/reporte_diario.dart';
 import '../../../domain/models/tarea_obra.dart';
 import '../../../domain/models/ubicacion_obra.dart';
@@ -90,6 +91,7 @@ class ObrasViewModel extends ViewModelBase {
   List<ReporteDiario> _reportes = [];
   final Map<String, List<ReporteDiario>> _reportesPorObraCache = {};
   List<Usuario> _responsablesDisponibles = [];
+  List<PlantillaObra> _plantillasPersonales = [];
   String _textoBusqueda = '';
   EstadoObra? _filtroEstadoSemaforo;
   bool _mostrarSoloFinalizadas = false;
@@ -141,9 +143,29 @@ class ObrasViewModel extends ViewModelBase {
   /// Usuario autenticado actualmente.
   Usuario? get usuarioActual => _autenticacionRepository.usuarioActual;
 
-  /// Lista de capataces/ingenieros disponibles para asignar como responsables.
+  /// Lista de capataces y el ingeniero actual disponibles para asignar como
+  /// responsables de una obra nueva.
   List<Usuario> get responsablesDisponibles =>
       List.unmodifiable(_responsablesDisponibles);
+
+  /// Tareas guardadas en el catálogo individual del ingeniero activo.
+  List<PlantillaObra> get tareasGuardadas => List.unmodifiable(
+        _plantillasPersonales
+            .where((p) => p.tipo == TipoPlantilla.tarea)
+            .toList(),
+      );
+
+  /// Materiales guardados en el catálogo individual del ingeniero activo.
+  List<PlantillaObra> get materialesGuardados => List.unmodifiable(
+        _plantillasPersonales
+            .where((p) => p.tipo == TipoPlantilla.material)
+            .toList(),
+      );
+
+  /// Indica si el usuario autenticado puede elegir la tarea actual en curso
+  /// de [obra] (capataz responsable o ingeniero a cargo).
+  bool puedeElegirTareaActual(Obra obra) =>
+      _politicas.puedeElegirTareaActual(usuarioActual, obra);
 
   /// Ubicación inicial sugerida para el selector de Google Maps.
   UbicacionObra get ubicacionPorDefecto => _mapaService.ubicacionPorDefecto;
@@ -282,7 +304,10 @@ class ObrasViewModel extends ViewModelBase {
       );
       _reportesPorObraCache.clear();
       _responsablesDisponibles =
-          await _autenticacionRepository.obtenerResponsablesDisponibles();
+          await _autenticacionRepository.obtenerResponsablesDisponibles(
+        forzarRecarga: forzarRecarga,
+      );
+      _plantillasPersonales = await _cargarPlantillasUsuarioActual();
       _estado = EstadoCargaObras.exito;
       notificarSiActivo();
     } catch (e) {
@@ -337,7 +362,10 @@ class ObrasViewModel extends ViewModelBase {
       _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
       _reportesPorObraCache.clear();
       _responsablesDisponibles =
-          await _autenticacionRepository.obtenerResponsablesDisponibles();
+          await _autenticacionRepository.obtenerResponsablesDisponibles(
+        forzarRecarga: true,
+      );
+      _plantillasPersonales = await _cargarPlantillasUsuarioActual();
       if (resultado.tuvoErrores) {
         _mensajeErrorSincronizacion = resultado.mensajeError;
       }
@@ -378,7 +406,10 @@ class ObrasViewModel extends ViewModelBase {
       _reportes = await _obrasRepository.obtenerReportes(forzarRecarga: true);
       _reportesPorObraCache.clear();
       _responsablesDisponibles =
-          await _autenticacionRepository.obtenerResponsablesDisponibles();
+          await _autenticacionRepository.obtenerResponsablesDisponibles(
+        forzarRecarga: true,
+      );
+      _plantillasPersonales = await _cargarPlantillasUsuarioActual();
       if (resultado.tuvoErrores) {
         _mensajeErrorSincronizacion = resultado.mensajeError;
       } else if (resultado.cambiosDescargados > 0) {
@@ -529,6 +560,97 @@ class ObrasViewModel extends ViewModelBase {
     }
   }
 
+  /// Elige explícitamente cuál es la tarea pendiente actualmente en curso
+  /// de una obra (permitido solo para el capataz responsable o el ingeniero
+  /// a cargo según [Politicas.puedeElegirTareaActual]).
+  Future<void> cambiarTareaActual(String obraId, String? tareaId) async {
+    final obra = obtenerObraPorId(obraId);
+    if (obra == null || !puedeElegirTareaActual(obra)) return;
+
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
+
+    try {
+      await _obrasRepository.cambiarTareaActual(obraId, tareaId);
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _guardando = false;
+      notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo actualizar la tarea actual: $e';
+      notificarSiActivo();
+    }
+  }
+
+  /// Añade un material nuevo a una obra en curso y dispara sincronización.
+  Future<void> agregarMaterialAObra(
+    String obraId,
+    String nombreMaterial,
+  ) async {
+    if (nombreMaterial.trim().isEmpty) return;
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
+
+    try {
+      await _obrasRepository.agregarMaterialAObra(obraId, nombreMaterial);
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      _guardando = false;
+      notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo agregar el material: $e';
+      notificarSiActivo();
+    }
+  }
+
+  /// Guarda una tarea o material frecuente en el catálogo individual del
+  /// ingeniero autenticado.
+  Future<void> guardarPlantillaPersonal({
+    required TipoPlantilla tipo,
+    required String nombre,
+  }) async {
+    final usuario = usuarioActual;
+    if (usuario == null || nombre.trim().isEmpty) return;
+
+    try {
+      await _obrasRepository.guardarPlantilla(
+        usuarioId: usuario.id,
+        tipo: tipo,
+        nombre: nombre,
+      );
+      _plantillasPersonales = await _cargarPlantillasUsuarioActual();
+      notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
+    } catch (e) {
+      _mensajeError = 'No se pudo guardar en tu catálogo: $e';
+      notificarSiActivo();
+    }
+  }
+
+  /// Quita una tarea o material del catálogo individual del ingeniero sin
+  /// afectar obras ya creadas.
+  Future<void> eliminarPlantillaPersonal(String id) async {
+    try {
+      await _obrasRepository.eliminarPlantilla(id);
+      _plantillasPersonales = await _cargarPlantillasUsuarioActual();
+      notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
+    } catch (e) {
+      _mensajeError = 'No se pudo eliminar del catálogo: $e';
+      notificarSiActivo();
+    }
+  }
+
+  Future<List<PlantillaObra>> _cargarPlantillasUsuarioActual() async {
+    final usuario = usuarioActual;
+    if (usuario == null) return const [];
+    return _obrasRepository.obtenerPlantillasUsuario(usuario.id);
+  }
+
   /// Crea una nueva obra desde la vista del Ingeniero con IDs UUID v4 y UTC.
   Future<void> crearNuevaObra({
     required String nombre,
@@ -567,6 +689,8 @@ class ObrasViewModel extends ViewModelBase {
         fechaUltimoReporte: ahoraUtc,
         responsableId: responsable.id,
         responsableNombre: responsable.nombre,
+        ingenieroId: usuarioActual?.id,
+        ingenieroNombre: usuarioActual?.nombre,
         tareas: tareasCreadas,
         materiales: materiales,
         ubicacion: ubicacion,
@@ -758,6 +882,7 @@ class ObrasViewModel extends ViewModelBase {
         _reportes = [];
         _reportesPorObraCache.clear();
         _responsablesDisponibles = [];
+        _plantillasPersonales = [];
         _textoBusqueda = '';
         _filtroEstadoSemaforo = null;
         _mostrarSoloFinalizadas = false;

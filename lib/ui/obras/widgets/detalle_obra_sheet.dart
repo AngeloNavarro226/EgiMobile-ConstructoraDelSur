@@ -16,14 +16,59 @@ Future<void> mostrarDialogoAgregarTarea({
   required Obra obra,
   required ObrasViewModel viewModel,
 }) async {
-  final controlador = TextEditingController();
   await showDialog<void>(
     context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: Text('Agregar tarea a "${obra.nombre}"'),
+    builder: (_) => _DialogoAgregarTarea(
+      obra: obra,
+      viewModel: viewModel,
+    ),
+  );
+}
+
+class _DialogoAgregarTarea extends StatefulWidget {
+  const _DialogoAgregarTarea({
+    required this.obra,
+    required this.viewModel,
+  });
+
+  final Obra obra;
+  final ObrasViewModel viewModel;
+
+  @override
+  State<_DialogoAgregarTarea> createState() => _DialogoAgregarTareaState();
+}
+
+class _DialogoAgregarTareaState extends State<_DialogoAgregarTarea> {
+  final TextEditingController _controlador = TextEditingController();
+  bool _guardando = false;
+
+  @override
+  void dispose() {
+    _controlador.dispose();
+    super.dispose();
+  }
+
+  Future<void> _guardar() async {
+    if (_guardando) return;
+    final texto = _controlador.text.trim();
+    if (texto.isNotEmpty) {
+      setState(() => _guardando = true);
+      await widget.viewModel.agregarTareaAObra(widget.obra.id, texto);
+    }
+    if (mounted) {
+      Navigator.pop(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('Agregar tarea a "${widget.obra.nombre}"'),
       content: TextField(
-        controller: controlador,
+        controller: _controlador,
         autofocus: true,
+        textInputAction: TextInputAction.done,
+        onSubmitted: (_) => unawaited(_guardar()),
         decoration: const InputDecoration(
           labelText: 'Nombre de la nueva tarea',
           hintText: 'Ej. Revoque fino planta baja',
@@ -32,19 +77,229 @@ Future<void> mostrarDialogoAgregarTarea({
       ),
       actions: [
         TextButton(
-          onPressed: () => Navigator.pop(dialogContext),
+          onPressed: _guardando ? null : () => Navigator.pop(context),
           child: const Text('Cancelar'),
         ),
         FilledButton(
-          onPressed: () async {
-            if (controlador.text.trim().isNotEmpty) {
-              await viewModel.agregarTareaAObra(obra.id, controlador.text);
-            }
-            if (dialogContext.mounted) {
-              Navigator.pop(dialogContext);
-            }
-          },
+          onPressed: _guardando ? null : () => unawaited(_guardar()),
           child: const Text('Agregar tarea'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Diálogo para añadir un nuevo material a una obra en curso (permite escribir
+/// uno libre o elegir en un toque desde el catálogo personal del ingeniero).
+Future<void> mostrarDialogoAgregarMaterial({
+  required BuildContext context,
+  required Obra obra,
+  required ObrasViewModel viewModel,
+}) async {
+  await showDialog<void>(
+    context: context,
+    builder: (_) => _DialogoAgregarMaterial(
+      obra: obra,
+      viewModel: viewModel,
+    ),
+  );
+}
+
+class _DialogoAgregarMaterial extends StatefulWidget {
+  const _DialogoAgregarMaterial({
+    required this.obra,
+    required this.viewModel,
+  });
+
+  final Obra obra;
+  final ObrasViewModel viewModel;
+
+  @override
+  State<_DialogoAgregarMaterial> createState() =>
+      _DialogoAgregarMaterialState();
+}
+
+class _DialogoAgregarMaterialState extends State<_DialogoAgregarMaterial> {
+  final TextEditingController _controlador = TextEditingController();
+  bool _guardando = false;
+
+  @override
+  void dispose() {
+    _controlador.dispose();
+    super.dispose();
+  }
+
+  Future<void> _guardar(String obraId) async {
+    if (_guardando) return;
+    final texto = _controlador.text.trim();
+    if (texto.isNotEmpty) {
+      setState(() => _guardando = true);
+      _controlador.clear();
+      await widget.viewModel.agregarMaterialAObra(obraId, texto);
+    }
+    if (mounted) {
+      Navigator.pop(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.viewModel,
+      builder: (context, _) {
+        final obraActualizada =
+            widget.viewModel.obtenerObraPorId(widget.obra.id) ?? widget.obra;
+        final materialesExistentesLower = obraActualizada.materiales
+            .map((m) => m.trim().toLowerCase())
+            .toSet();
+        final sugerencias = widget.viewModel.materialesGuardados
+            .where(
+              (p) => !materialesExistentesLower
+                  .contains(p.nombre.trim().toLowerCase()),
+            )
+            .toList();
+
+        return AlertDialog(
+          title: Text('Añadir material · ${obraActualizada.nombre}'),
+          content: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  TextField(
+                    controller: _controlador,
+                    autofocus: true,
+                    textInputAction: TextInputAction.done,
+                    onSubmitted: (_) => unawaited(_guardar(obraActualizada.id)),
+                    decoration: const InputDecoration(
+                      labelText: 'Nombre del material',
+                      hintText: 'Ej. Hormigón H-21',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  if (sugerencias.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    const Text(
+                      'Tus materiales guardados (tocar para añadir):',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 6,
+                      children: [
+                        for (final plantilla in sugerencias)
+                          ActionChip(
+                            avatar: const Icon(Icons.add, size: 16),
+                            label: Text(plantilla.nombre),
+                            onPressed: _guardando
+                                ? null
+                                : () {
+                                    unawaited(
+                                      widget.viewModel.agregarMaterialAObra(
+                                        obraActualizada.id,
+                                        plantilla.nombre,
+                                      ),
+                                    );
+                                  },
+                          ),
+                      ],
+                    ),
+                  ],
+                  if (obraActualizada.materiales.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Materiales en la obra (${obraActualizada.materiales.length}):',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      obraActualizada.materiales.join(', '),
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: _guardando ? null : () => Navigator.pop(context),
+              child: const Text('Cerrar'),
+            ),
+            FilledButton(
+              onPressed: _guardando
+                  ? null
+                  : () => unawaited(_guardar(obraActualizada.id)),
+              child: const Text('Añadir material'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Diálogo para que el capataz responsable o el ingeniero a cargo elijan
+/// explícitamente cuál de las tareas pendientes es la "Tarea actual en curso".
+Future<void> mostrarDialogoElegirTareaActual({
+  required BuildContext context,
+  required Obra obra,
+  required ObrasViewModel viewModel,
+}) async {
+  final pendientes = obra.tareasPendientes;
+  if (pendientes.isEmpty) return;
+
+  final tareaActivaId = obra.tareaActualObj?.id;
+  await showDialog<void>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: Text('Elegir tarea actual · ${obra.nombre}'),
+      content: SizedBox(
+        width: 420,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final tarea in pendientes)
+                ListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(
+                    tarea.id == tareaActivaId
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_unchecked,
+                    color: tarea.id == tareaActivaId
+                        ? Theme.of(context).colorScheme.primary
+                        : null,
+                  ),
+                  title: Text(tarea.nombre),
+                  subtitle: tarea.id == tareaActivaId
+                      ? const Text('Tarea actual en curso')
+                      : null,
+                  onTap: () async {
+                    await viewModel.cambiarTareaActual(obra.id, tarea.id);
+                    if (dialogContext.mounted) {
+                      Navigator.pop(dialogContext);
+                    }
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Cancelar'),
         ),
       ],
     ),
@@ -96,26 +351,65 @@ Future<void> mostrarDialogoModificarEstadoTareas({
                       child: Text('No hay tareas pendientes.'),
                     ),
                   for (final t in pendientes)
-                    CheckboxListTile(
+                    ListTile(
                       dense: true,
                       contentPadding: EdgeInsets.zero,
-                      value: t.completada,
+                      leading: Checkbox(
+                        value: t.completada,
+                        onChanged: permiteEdicion
+                            ? (_) {
+                                unawaited(
+                                  viewModel.alternarTareaCompletada(
+                                    obraActualizada.id,
+                                    t.id,
+                                  ),
+                                );
+                              }
+                            : null,
+                      ),
                       title: Text(t.nombre),
-                      subtitle: permiteEdicion
-                          ? const Text(
-                              'Tocá para marcar como completada',
-                              style: TextStyle(fontSize: 11),
+                      subtitle: Text(
+                        t.id == obraActualizada.tareaActualObj?.id
+                            ? 'Tarea actual en curso'
+                            : (permiteEdicion
+                                ? 'Tocá el casillero para marcar como completada'
+                                : 'Pendiente'),
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: t.id == obraActualizada.tareaActualObj?.id
+                              ? FontWeight.w600
+                              : null,
+                        ),
+                      ),
+                      trailing: viewModel.puedeElegirTareaActual(
+                        obraActualizada,
+                      )
+                          ? IconButton(
+                              tooltip:
+                                  t.id == obraActualizada.tareaActualObj?.id
+                                      ? 'Tarea actual en curso'
+                                      : 'Marcar como tarea actual',
+                              icon: Icon(
+                                t.id == obraActualizada.tareaActualObj?.id
+                                    ? Icons.flag
+                                    : Icons.flag_outlined,
+                                color:
+                                    t.id == obraActualizada.tareaActualObj?.id
+                                        ? Theme.of(context).colorScheme.primary
+                                        : null,
+                              ),
+                              onPressed:
+                                  t.id == obraActualizada.tareaActualObj?.id
+                                      ? null
+                                      : () {
+                                          unawaited(
+                                            viewModel.cambiarTareaActual(
+                                              obraActualizada.id,
+                                              t.id,
+                                            ),
+                                          );
+                                        },
                             )
-                          : null,
-                      onChanged: permiteEdicion
-                          ? (_) {
-                              unawaited(
-                                viewModel.alternarTareaCompletada(
-                                  obraActualizada.id,
-                                  t.id,
-                                ),
-                              );
-                            }
                           : null,
                     ),
                   const Divider(),
@@ -280,6 +574,12 @@ class _DetalleObraEnriquecidoSheetState
                     etiqueta: 'Responsable asignado',
                     valor: obra.responsableNombre,
                   ),
+                  if (obra.ingenieroNombre != null &&
+                      obra.ingenieroNombre!.isNotEmpty)
+                    _FilaDato(
+                      etiqueta: 'Ingeniero a cargo',
+                      valor: obra.ingenieroNombre!,
+                    ),
                   _FilaDato(
                     etiqueta: 'Ubicación (Google Maps)',
                     valor: obra.ubicacion.etiquetaCompleta,
@@ -295,7 +595,9 @@ class _DetalleObraEnriquecidoSheetState
                   ),
                   _FilaDato(
                     etiqueta: 'Materiales de la obra',
-                    valor: obra.materiales.join(', '),
+                    valor: obra.materiales.isEmpty
+                        ? 'Sin materiales cargados'
+                        : obra.materiales.join(', '),
                   ),
                   _FilaDato(
                     etiqueta: 'Observaciones actuales',
@@ -465,6 +767,32 @@ class _DetalleObraEnriquecidoSheetState
                     leading: const Icon(Icons.construction),
                     title: Text(obra.tareaActual),
                     subtitle: const Text('Tarea actual en curso'),
+                    trailing: viewModel.puedeElegirTareaActual(obra)
+                        ? TextButton.icon(
+                            onPressed: () {
+                              unawaited(
+                                mostrarDialogoElegirTareaActual(
+                                  context: context,
+                                  obra: obra,
+                                  viewModel: viewModel,
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.swap_horiz, size: 18),
+                            label: const Text('Cambiar'),
+                          )
+                        : null,
+                    onTap: viewModel.puedeElegirTareaActual(obra)
+                        ? () {
+                            unawaited(
+                              mostrarDialogoElegirTareaActual(
+                                context: context,
+                                obra: obra,
+                                viewModel: viewModel,
+                              ),
+                            );
+                          }
+                        : null,
                   ),
                   ListTile(
                     contentPadding: EdgeInsets.zero,
@@ -593,6 +921,19 @@ class _DetalleObraEnriquecidoSheetState
                           },
                           icon: const Icon(Icons.add_task),
                           label: const Text('Añadir tarea'),
+                        ),
+                        OutlinedButton.icon(
+                          onPressed: () {
+                            unawaited(
+                              mostrarDialogoAgregarMaterial(
+                                context: context,
+                                obra: obra,
+                                viewModel: viewModel,
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.inventory_2_outlined),
+                          label: const Text('Añadir material'),
                         ),
                         FilledButton.icon(
                           onPressed: () {

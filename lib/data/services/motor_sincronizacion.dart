@@ -156,6 +156,35 @@ class MotorSincronizacion {
           }
 
           final materiales = await _local.obtenerMaterialesDeObra(id);
+          final tareasPendientesActuales =
+              await _local.obtenerPendientesDeTabla('tareas_obra');
+          final tareaActualId = obra['tarea_actual_id'] as String?;
+          final tareaActualPendiente = tareaActualId != null &&
+              tareasPendientesActuales.any((t) => t['id'] == tareaActualId);
+
+          if (tareaActualPendiente) {
+            final obraSinTareaActual = Map<String, dynamic>.from(obra)
+              ..['tarea_actual_id'] = null;
+            await _remoto.upsertObra(
+              obra: obraSinTareaActual,
+              materiales: materiales,
+            );
+            for (final tarea
+                in tareasPendientesActuales.where((t) => t['obra_id'] == id)) {
+              final tId = tarea['id'] as String;
+              await _remoto.upsertTarea(tarea);
+              await _local.marcarEntidadSincronizada(
+                tabla: 'tareas_obra',
+                id: tId,
+              );
+              await _local.limpiarFalloSincronizacion(
+                entidad: 'tareas_obra',
+                entidadId: tId,
+              );
+              sincronizados++;
+            }
+          }
+
           await _remoto.upsertObra(obra: obra, materiales: materiales);
           await _local.marcarEntidadSincronizada(tabla: 'obras', id: id);
           await _local.limpiarFalloSincronizacion(
@@ -282,6 +311,32 @@ class MotorSincronizacion {
             error: e.toString(),
           );
           registrarError('Error al sincronizar notificación $id: $e');
+        }
+      }
+
+      // 5b. Push catálogo de plantillas personales pendientes
+      for (final plantilla
+          in await _local.obtenerPendientesDeTabla('catalogo_plantillas')) {
+        final id = plantilla['id'] as String;
+        try {
+          await _remoto.upsertPlantilla(plantilla);
+          await _local.marcarEntidadSincronizada(
+            tabla: 'catalogo_plantillas',
+            id: id,
+          );
+          await _local.limpiarFalloSincronizacion(
+            entidad: 'catalogo_plantillas',
+            entidadId: id,
+          );
+          sincronizados++;
+        } catch (e) {
+          await _local.registrarFalloSincronizacion(
+            entidad: 'catalogo_plantillas',
+            entidadId: id,
+            operacion: 'upsert',
+            error: e.toString(),
+          );
+          registrarError('Error al sincronizar plantilla $id: $e');
         }
       }
 
@@ -427,6 +482,19 @@ class MotorSincronizacion {
       }
       await _local
           .guardarNotificacionCruda({...notif, 'sync_status': 'synced'});
+      aplicados++;
+    }
+
+    for (final plantilla in cambios.plantillas) {
+      final id = plantilla['id'] as String;
+      if (await _local.estaPendienteLocal(
+        tabla: 'catalogo_plantillas',
+        id: id,
+      )) {
+        continue;
+      }
+      await _local
+          .guardarPlantillaCruda({...plantilla, 'sync_status': 'synced'});
       aplicados++;
     }
 

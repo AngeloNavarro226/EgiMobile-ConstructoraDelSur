@@ -13,6 +13,7 @@ import 'package:constructora_del_sur/ui/autenticacion/view_models/autenticacion_
 import 'package:constructora_del_sur/ui/exportar/view_models/exportar_view_model.dart';
 import 'package:constructora_del_sur/ui/notificaciones/view_models/notificaciones_view_model.dart';
 import 'package:constructora_del_sur/ui/obras/view_models/obras_view_model.dart';
+import 'package:constructora_del_sur/ui/obras/widgets/detalle_obra_sheet.dart';
 import 'package:constructora_del_sur/ui/perfil/view_models/perfil_view_model.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -112,6 +113,105 @@ void main() {
 
       expect(find.text('+54 9 261 555-0102'), findsOneWidget);
 
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  testWidgets(
+    'Añadir tarea, añadir material y cambiar tarea actual en DetalleObraEnriquecidoSheet cierran sin errores de ciclo de vida',
+    (tester) async {
+      final bus = BusDeEventos();
+      final db = BaseDatosLocalService();
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
+      );
+      final obrasVm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      await obrasVm.cargar(forzarRecarga: true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DetalleObraEnriquecidoSheet(
+              obraId: '1',
+              viewModel: obrasVm,
+              capacidades: const CapacidadesFalsas(),
+              permiteEdicion: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // 1. Añadir tarea desde el detalle
+      await tester.ensureVisible(find.text('Añadir tarea'));
+      await tester.tap(find.text('Añadir tarea'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Revoque fino interior');
+      await tester.tap(find.text('Agregar tarea'));
+      await tester.pumpAndSettle();
+
+      expect(
+        obrasVm
+            .obtenerObraPorId('1')!
+            .tareas
+            .any((t) => t.nombre == 'Revoque fino interior'),
+        isTrue,
+      );
+
+      // 2. Añadir material desde el detalle
+      await tester.ensureVisible(find.text('Añadir material'));
+      await tester.tap(find.text('Añadir material'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Pintura látex');
+      await tester.tap(find.widgetWithText(FilledButton, 'Añadir material'));
+      await tester.pumpAndSettle();
+
+      expect(
+        obrasVm.obtenerObraPorId('1')!.materiales,
+        contains('Pintura látex'),
+      );
+
+      // 3. Cambiar tarea actual
+      await tester.ensureVisible(find.text('Cambiar'));
+      await tester.tap(find.text('Cambiar'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Revoque fino interior'));
+      await tester.pumpAndSettle();
+
+      expect(
+        obrasVm.obtenerObraPorId('1')!.tareaActual,
+        'Revoque fino interior',
+      );
+
+      obrasVm.dispose();
       await notifFalsas.dispose();
       await bus.dispose();
     },

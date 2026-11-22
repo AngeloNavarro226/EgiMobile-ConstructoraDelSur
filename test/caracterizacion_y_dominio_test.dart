@@ -15,10 +15,12 @@ import 'package:constructora_del_sur/data/services/voz_a_texto_service.dart';
 import 'package:constructora_del_sur/domain/models/evento_de_app.dart';
 import 'package:constructora_del_sur/domain/models/horarios.dart';
 import 'package:constructora_del_sur/domain/models/obra.dart';
+import 'package:constructora_del_sur/domain/models/plantilla_obra.dart';
 import 'package:constructora_del_sur/domain/models/reporte_diario.dart';
-import 'package:constructora_del_sur/domain/models/rol.dart';
 import 'package:constructora_del_sur/domain/models/tarea_obra.dart';
 import 'package:constructora_del_sur/domain/models/ubicacion_obra.dart';
+import 'package:constructora_del_sur/domain/models/usuario.dart';
+import 'package:constructora_del_sur/plataforma/politicas.dart';
 import 'package:constructora_del_sur/ui/autenticacion/view_models/autenticacion_view_model.dart';
 import 'package:constructora_del_sur/ui/core/view_model_base.dart';
 import 'package:constructora_del_sur/ui/exportar/view_models/exportar_view_model.dart';
@@ -722,6 +724,7 @@ void main() {
         'estado_semaforo': 'aTiempo',
         'fecha_ultimo_reporte': '2026-11-22T00:00:00Z',
         'responsable_id': 'u1',
+        'ingeniero_id': 'u_ing',
         'ubicacion_latitud': -32.88,
         'ubicacion_longitud': -68.84,
         'ubicacion_direccion': 'Mendoza',
@@ -733,6 +736,7 @@ void main() {
       });
       expect(obraRemota['con_foto'], isTrue);
       expect(obraRemota['finalizada'], isFalse);
+      expect(obraRemota['ingeniero_id'], 'u_ing');
 
       final obraLocal = mapearObraRemotaALocal({
         ...obraRemota,
@@ -753,6 +757,7 @@ void main() {
       });
       expect(obraLocal['con_foto'], 1);
       expect(obraLocal['finalizada'], 0);
+      expect(obraLocal['ingeniero_id'], 'u_ing');
       expect(obraLocal['materiales'], ['Cemento']);
       expect((obraLocal['tareas'] as List).first['completada'], 1);
     },
@@ -856,6 +861,372 @@ void main() {
         obraActualizada?.observaciones,
         'Cambio en tiempo real desde otro teléfono',
       );
+
+      vm.dispose();
+      await remoto.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  test(
+    'Crear obra como ingeniero asignada a un capataz guarda ingenieroId y responsableId',
+    () async {
+      final reloj = RelojFijo(DateTime.utc(2026, 11, 22, 16, 0));
+      final db = BaseDatosLocalService(reloj: reloj);
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        reloj: reloj,
+      );
+      final obrasRepo = ObrasRepository(baseDatosService: db, reloj: reloj);
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        reloj: reloj,
+        autenticacionRepository: authRepo,
+      );
+      final bus = BusDeEventos();
+
+      final vm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(reloj: reloj),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+        reloj: reloj,
+        generadorIds: GeneradorIdsSecuencial(prefijo: 'obra_ing'),
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      await vm.cargar();
+      final capataz = vm.responsablesDisponibles.firstWhere(
+        (u) => u.id == 'u_capataz',
+      );
+
+      await vm.crearNuevaObra(
+        nombre: 'Edificio Norte',
+        responsable: capataz,
+        nombresTareas: const ['Replanteo'],
+        materiales: const ['Cemento'],
+        ubicacion: const UbicacionObra(
+          latitud: -32.89,
+          longitud: -68.84,
+          direccion: 'Av. Colón 300, Mendoza',
+        ),
+        estadoInicial: EstadoObra.aTiempo,
+        observaciones: 'Inicio de obra',
+      );
+
+      final creada = vm.obrasFiltradas.firstWhere(
+        (o) => o.nombre == 'Edificio Norte',
+      );
+      expect(creada.responsableId, 'u_capataz');
+      expect(creada.ingenieroId, 'u_ingeniero');
+      expect(creada.ingenieroNombre, 'Ing. Braulio Hormigón');
+
+      final recargadas = await obrasRepo.obtenerObras(forzarRecarga: true);
+      final desdeBd = recargadas.firstWhere((o) => o.id == creada.id);
+      expect(desdeBd.responsableId, 'u_capataz');
+      expect(desdeBd.ingenieroId, 'u_ingeniero');
+      expect(desdeBd.ingenieroNombre, 'Ing. Braulio Hormigón');
+
+      vm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  test(
+    'Sync en modo Supabase refresca responsables (capataces + ingeniero actual, sin otros ingenieros)',
+    () async {
+      final reloj = RelojFijo(DateTime.utc(2026, 11, 22, 17, 0));
+      final db = BaseDatosLocalService(
+        reloj: reloj,
+        insertarSemillasDePrueba: false,
+      );
+      final bus = BusDeEventos();
+      final remoto = FakeFuenteDatosRemota(
+        cambiosParaPull: CambiosRemotos(
+          usuarios: [
+            {
+              'id': 'ing_1',
+              'username': 'ing1',
+              'rol_id': 'rol_ingeniero',
+              'nombre': 'Ing. Braulio Hormigón',
+              'contrasenia': '',
+              'telefono': '',
+              'updated_at': reloj.ahora().toIso8601String(),
+              'sync_status': 'synced',
+            },
+            {
+              'id': 'ing_2',
+              'username': 'ing2',
+              'rol_id': 'rol_ingeniero',
+              'nombre': 'Ing. Sofía Acero',
+              'contrasenia': '',
+              'telefono': '',
+              'updated_at': reloj.ahora().toIso8601String(),
+              'sync_status': 'synced',
+            },
+            {
+              'id': 'cap_1',
+              'username': 'cap1',
+              'rol_id': 'rol_capataz',
+              'nombre': 'Carlos Méndez (Capataz)',
+              'contrasenia': '',
+              'telefono': '',
+              'updated_at': reloj.ahora().toIso8601String(),
+              'sync_status': 'synced',
+            },
+            {
+              'id': 'dueno_1',
+              'username': 'dueno',
+              'rol_id': 'rol_duenio',
+              'nombre': 'Roberto Del Sur (Dueño)',
+              'contrasenia': '',
+              'telefono': '',
+              'updated_at': reloj.ahora().toIso8601String(),
+              'sync_status': 'synced',
+            },
+          ],
+        ),
+      );
+      final authRemota = FakeServicioAutenticacionRemota(
+        perfilesPorEmail: {
+          'ing1@constructoradelsur.com': {
+            'id': 'ing_1',
+            'username': 'ing1',
+            'rol_id': 'rol_ingeniero',
+            'rol_codigo': 'ingeniero',
+            'rol_nombre': 'Ingeniero Jefe de Obra',
+            'nombre': 'Ing. Braulio Hormigón',
+            'telefono': '',
+            'updated_at': reloj.ahora().toIso8601String(),
+          },
+        },
+      );
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        authRemota: authRemota,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final motor = MotorSincronizacion(
+        baseDatosLocal: db,
+        fuenteRemota: remoto,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        reloj: reloj,
+        motorSincronizacion: motor,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        reloj: reloj,
+      );
+      final vm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(reloj: reloj),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const Politicas(),
+        busDeEventos: bus,
+        reloj: reloj,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ing1',
+        contrasenia: 'Password123!',
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+
+      final ids = vm.responsablesDisponibles.map((u) => u.id).toList();
+      expect(ids, ['cap_1', 'ing_1']);
+      expect(ids, isNot(contains('ing_2')));
+      expect(ids, isNot(contains('dueno_1')));
+
+      vm.dispose();
+      await remoto.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  test(
+    'Catálogo individual por ingeniero, obra sin materiales iniciales, alta de material en curso y tarea actual elegible',
+    () async {
+      final reloj = RelojFijo(DateTime.utc(2026, 11, 22, 17, 15));
+      final db = BaseDatosLocalService(reloj: reloj);
+      final bus = BusDeEventos();
+      final remoto = FakeFuenteDatosRemota();
+      final motor = MotorSincronizacion(
+        baseDatosLocal: db,
+        fuenteRemota: remoto,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        reloj: reloj,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        reloj: reloj,
+        motorSincronizacion: motor,
+        busDeEventos: bus,
+        generadorIds: GeneradorIdsSecuencial(prefijo: 'cat'),
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        reloj: reloj,
+      );
+      final vm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(reloj: reloj),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const Politicas(),
+        busDeEventos: bus,
+        reloj: reloj,
+        generadorIds: GeneradorIdsSecuencial(prefijo: 'vm_cat'),
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      await vm.cargar(forzarRecarga: true);
+
+      // 1. Catálogo personal del ingeniero: guardar, sincronizar y eliminar
+      await vm.guardarPlantillaPersonal(
+        tipo: TipoPlantilla.tarea,
+        nombre: 'Impermeabilización de terraza',
+      );
+      await vm.guardarPlantillaPersonal(
+        tipo: TipoPlantilla.material,
+        nombre: 'Membrana asfáltica 4mm',
+      );
+      expect(
+        vm.tareasGuardadas
+            .any((p) => p.nombre == 'Impermeabilización de terraza'),
+        isTrue,
+      );
+      expect(
+        vm.materialesGuardados.any((p) => p.nombre == 'Membrana asfáltica 4mm'),
+        isTrue,
+      );
+
+      // Verificar aislamiento individual: el capataz no ve las plantillas del ingeniero
+      final plantillasCapataz =
+          await obrasRepo.obtenerPlantillasUsuario('u_capataz');
+      expect(plantillasCapataz, isEmpty);
+
+      final syncPlantillas = await obrasRepo.sincronizarTodo(
+        permitirSimulacionLocal: false,
+      );
+      expect(syncPlantillas.tuvoErrores, isFalse);
+      expect(remoto.plantillasRemotas.length, greaterThanOrEqualTo(2));
+
+      final creadaPlantilla = vm.materialesGuardados.firstWhere(
+        (p) => p.nombre == 'Membrana asfáltica 4mm',
+      );
+      await vm.eliminarPlantillaPersonal(creadaPlantilla.id);
+      expect(
+        vm.materialesGuardados.any((p) => p.id == creadaPlantilla.id),
+        isFalse,
+      );
+
+      // 2. Obra creada sin materiales iniciales + añadir material en curso
+      final capataz = vm.responsablesDisponibles.firstWhere(
+        (u) => u.id == 'u_capataz',
+      );
+      await vm.crearNuevaObra(
+        nombre: 'Obra Sin Materiales',
+        responsable: capataz,
+        nombresTareas: const ['Tarea A', 'Tarea B', 'Tarea C'],
+        materiales: const [],
+        ubicacion: const UbicacionObra(
+          latitud: -32.89,
+          longitud: -68.84,
+          direccion: 'Mendoza',
+        ),
+        estadoInicial: EstadoObra.aTiempo,
+        observaciones: '',
+      );
+
+      var obra = vm.obrasFiltradas.firstWhere(
+        (o) => o.nombre == 'Obra Sin Materiales',
+      );
+      expect(obra.materiales, isEmpty);
+      expect(obra.tareaActual, 'Tarea A');
+
+      await vm.agregarMaterialAObra(obra.id, 'Cal hidráulica');
+      obra = vm.obtenerObraPorId(obra.id)!;
+      expect(obra.materiales, ['Cal hidráulica']);
+
+      // 3. Elegir tarea actual explícita y verificar auto-limpieza al completarla
+      final tareaC = obra.tareas.firstWhere((t) => t.nombre == 'Tarea C');
+      expect(vm.puedeElegirTareaActual(obra), isTrue);
+      await vm.cambiarTareaActual(obra.id, tareaC.id);
+      obra = vm.obtenerObraPorId(obra.id)!;
+      expect(obra.tareaActualId, tareaC.id);
+      expect(obra.tareaActual, 'Tarea C');
+
+      // Al completar la tarea elegida, vuelve automáticamente a la primera pendiente
+      await vm.alternarTareaCompletada(obra.id, tareaC.id);
+      obra = vm.obtenerObraPorId(obra.id)!;
+      expect(obra.tareaActualId, isNull);
+      expect(obra.tareaActual, 'Tarea A');
+
+      // 4. Política de autorización estricta para elegir tarea actual
+      const politicas = Politicas();
+      const otroIngeniero = Usuario(
+        id: 'u_ing_2',
+        username: 'ing2',
+        nombre: 'Ing. Otra',
+        contrasenia: '',
+        rol: Rol.ingeniero,
+      );
+      const otroCapataz = Usuario(
+        id: 'u_cap_2',
+        username: 'cap2',
+        nombre: 'Capataz Otro',
+        contrasenia: '',
+        rol: Rol.capataz,
+      );
+      const duenio = Usuario(
+        id: 'u_duenio',
+        username: 'duenio',
+        nombre: 'Dueño',
+        contrasenia: '',
+        rol: Rol.duenio,
+      );
+      expect(politicas.puedeElegirTareaActual(capataz, obra), isTrue);
+      expect(politicas.puedeElegirTareaActual(vm.usuarioActual, obra), isTrue);
+      expect(politicas.puedeElegirTareaActual(otroIngeniero, obra), isFalse);
+      expect(politicas.puedeElegirTareaActual(otroCapataz, obra), isFalse);
+      expect(politicas.puedeElegirTareaActual(duenio, obra), isFalse);
 
       vm.dispose();
       await remoto.dispose();

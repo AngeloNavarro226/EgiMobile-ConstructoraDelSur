@@ -51,6 +51,9 @@ class Obra {
     required this.fechaUltimoReporte,
     required this.responsableId,
     required this.responsableNombre,
+    this.ingenieroId,
+    this.ingenieroNombre,
+    this.tareaActualId,
     required this.tareas,
     required this.materiales,
     required this.ubicacion,
@@ -70,6 +73,16 @@ class Obra {
   final DateTime fechaUltimoReporte;
   final String responsableId;
   final String responsableNombre;
+
+  /// Identificador (`FK -> usuarios.id`) del Ingeniero Jefe a cargo de la obra.
+  final String? ingenieroId;
+
+  /// Nombre resuelto vía `LEFT JOIN usuarios` del Ingeniero Jefe a cargo.
+  final String? ingenieroNombre;
+
+  /// Identificador opcional (`FK -> tareas_obra.id`) de la tarea elegida
+  /// manualmente como "Tarea actual en curso".
+  final String? tareaActualId;
   final List<TareaObra> tareas;
   final List<String> materiales;
   final UbicacionObra ubicacion;
@@ -149,14 +162,30 @@ class Obra {
   /// Porcentaje entero (0 a 100) listo para mostrar en etiquetas y reportes.
   int get porcentajeAvance => (avance * 100).round();
 
-  /// Devuelve el nombre de la tarea actualmente en curso (la primera pendiente,
-  /// o el estado finalizado si la obra concluyó).
+  /// Devuelve la tarea pendiente actualmente en curso: prioriza [tareaActualId]
+  /// si existe y continúa pendiente, o cae a la primera tarea pendiente.
+  TareaObra? get tareaActualObj {
+    if (finalizada || tareas.isEmpty) return null;
+    if (tareaActualId != null) {
+      for (final tarea in tareas) {
+        if (tarea.id == tareaActualId && !tarea.completada) {
+          return tarea;
+        }
+      }
+    }
+    for (final tarea in tareas) {
+      if (!tarea.completada) return tarea;
+    }
+    return null;
+  }
+
+  /// Devuelve el nombre de la tarea actualmente en curso (la elegida en
+  /// [tareaActualId], o la primera pendiente, o el estado finalizado).
   String get tareaActual {
     if (finalizada) return 'Obra finalizada';
     if (tareas.isEmpty) return 'Sin tareas asignadas';
-    for (final tarea in tareas) {
-      if (!tarea.completada) return tarea.nombre;
-    }
+    final activa = tareaActualObj;
+    if (activa != null) return activa.nombre;
     return '${tareas.last.nombre} (Finalizada)';
   }
 
@@ -175,6 +204,10 @@ class Obra {
     DateTime? fechaUltimoReporte,
     String? responsableId,
     String? responsableNombre,
+    String? ingenieroId,
+    String? ingenieroNombre,
+    String? tareaActualId,
+    bool limpiarTareaActual = false,
     List<TareaObra>? tareas,
     List<String>? materiales,
     UbicacionObra? ubicacion,
@@ -194,6 +227,10 @@ class Obra {
         fechaUltimoReporte: fechaUltimoReporte ?? this.fechaUltimoReporte,
         responsableId: responsableId ?? this.responsableId,
         responsableNombre: responsableNombre ?? this.responsableNombre,
+        ingenieroId: ingenieroId ?? this.ingenieroId,
+        ingenieroNombre: ingenieroNombre ?? this.ingenieroNombre,
+        tareaActualId:
+            limpiarTareaActual ? null : (tareaActualId ?? this.tareaActualId),
         tareas: tareas ?? this.tareas,
         materiales: materiales ?? this.materiales,
         ubicacion: ubicacion ?? this.ubicacion,
@@ -214,6 +251,8 @@ class Obra {
         'estado_semaforo': estado.toStorage(),
         'fecha_ultimo_reporte': fechaUltimoReporte.toUtc().toIso8601String(),
         'responsable_id': responsableId,
+        'ingeniero_id': ingenieroId,
+        'tarea_actual_id': tareaActualId,
         'ubicacion_latitud': ubicacion.latitud,
         'ubicacion_longitud': ubicacion.longitud,
         'ubicacion_direccion': ubicacion.direccion,
@@ -229,7 +268,8 @@ class Obra {
       };
 
   /// Reconstruye una instancia de [Obra] desde un registro normalizado de SQLite
-  /// enriquecido con `responsable_nombre`, `tareas` y `materiales`.
+  /// enriquecido con `responsable_nombre`, `ingeniero_nombre`, `tareas` y
+  /// `materiales`.
   factory Obra.fromMap(Map<String, dynamic> map) {
     final tareasLista = (map['tareas'] as List<dynamic>? ?? const [])
         .map((item) => TareaObra.fromMap(item as Map<String, dynamic>))
@@ -254,6 +294,9 @@ class Obra {
       fechaUltimoReporte: DateTime.parse(map['fecha_ultimo_reporte'] as String),
       responsableId: map['responsable_id'] as String,
       responsableNombre: (map['responsable_nombre'] as String?) ?? 'Capataz',
+      ingenieroId: map['ingeniero_id'] as String?,
+      ingenieroNombre: map['ingeniero_nombre'] as String?,
+      tareaActualId: map['tarea_actual_id'] as String?,
       tareas: tareasLista,
       materiales: materialesLista,
       ubicacion: ubicacionDecodificada,

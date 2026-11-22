@@ -20,6 +20,7 @@ class SupabaseRemoteService implements FuenteDatosRemota {
     'reportes_diarios',
     'reporte_fotos',
     'notificaciones',
+    'catalogo_plantillas',
   ];
 
   final SupabaseClient _client;
@@ -157,6 +158,12 @@ class SupabaseRemoteService implements FuenteDatosRemota {
   }
 
   @override
+  Future<void> upsertPlantilla(Map<String, dynamic> plantilla) async {
+    final payload = mapearPlantillaLocalARemoto(plantilla);
+    await _client.from('catalogo_plantillas').upsert(payload, onConflict: 'id');
+  }
+
+  @override
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc) async {
     final isoCursor = ultimaSyncUtc?.toUtc().toIso8601String();
 
@@ -171,19 +178,18 @@ class SupabaseRemoteService implements FuenteDatosRemota {
         )
         .toList();
 
-    final usuariosQuery = _client
+    // Directorio corporativo completo (tabla pequeña, como `roles`) para que
+    // todos los capataces e ingenieros estén disponibles al asignar obras.
+    final usuariosRaw = await _client
         .from('usuarios')
         .select('id, username, rol_id, nombre, telefono, updated_at');
-    final usuariosRaw = isoCursor != null
-        ? await usuariosQuery.gt('updated_at', isoCursor)
-        : await usuariosQuery;
     final usuarios = usuariosRaw.map(mapearUsuarioRemotoALocal).toList();
 
     final obrasQuery = _client.from('obras').select(
           'id, nombre, estado_semaforo, fecha_ultimo_reporte, responsable_id, '
-          'ubicacion_latitud, ubicacion_longitud, ubicacion_direccion, '
-          'observaciones, con_foto, imagen, imagen_url, finalizada, '
-          'updated_at, deleted_at, '
+          'ingeniero_id, tarea_actual_id, ubicacion_latitud, '
+          'ubicacion_longitud, ubicacion_direccion, observaciones, con_foto, '
+          'imagen, imagen_url, finalizada, updated_at, deleted_at, '
           'obra_materiales(nombre), '
           'tareas_obra(id, obra_id, nombre, completada, orden, updated_at)',
         );
@@ -272,6 +278,14 @@ class SupabaseRemoteService implements FuenteDatosRemota {
     final notificaciones =
         notifRaw.map(mapearNotificacionRemotaALocal).toList();
 
+    final plantillasQuery = _client
+        .from('catalogo_plantillas')
+        .select('id, usuario_id, tipo, nombre, updated_at, deleted_at');
+    final plantillasRaw = isoCursor != null
+        ? await plantillasQuery.gt('updated_at', isoCursor)
+        : await plantillasQuery;
+    final plantillas = plantillasRaw.map(mapearPlantillaRemotaALocal).toList();
+
     return CambiosRemotos(
       roles: roles,
       usuarios: usuarios,
@@ -279,6 +293,7 @@ class SupabaseRemoteService implements FuenteDatosRemota {
       tareas: tareas,
       reportes: reportes,
       notificaciones: notificaciones,
+      plantillas: plantillas,
     );
   }
 
@@ -374,6 +389,8 @@ Map<String, dynamic> mapearObraLocalARemoto(Map<String, dynamic> local) => {
       'estado_semaforo': local['estado_semaforo'],
       'fecha_ultimo_reporte': local['fecha_ultimo_reporte'],
       'responsable_id': local['responsable_id'],
+      'ingeniero_id': local['ingeniero_id'],
+      'tarea_actual_id': local['tarea_actual_id'],
       'ubicacion_latitud': local['ubicacion_latitud'],
       'ubicacion_longitud': local['ubicacion_longitud'],
       'ubicacion_direccion': local['ubicacion_direccion'],
@@ -396,6 +413,8 @@ Map<String, dynamic> mapearObraRemotaALocal(Map<String, dynamic> remoto) {
     'estado_semaforo': remoto['estado_semaforo'],
     'fecha_ultimo_reporte': remoto['fecha_ultimo_reporte'],
     'responsable_id': remoto['responsable_id'],
+    'ingeniero_id': remoto['ingeniero_id'],
+    'tarea_actual_id': remoto['tarea_actual_id'],
     'ubicacion_latitud': (remoto['ubicacion_latitud'] as num).toDouble(),
     'ubicacion_longitud': (remoto['ubicacion_longitud'] as num).toDouble(),
     'ubicacion_direccion': remoto['ubicacion_direccion'],
@@ -530,4 +549,24 @@ Map<String, dynamic> mapearNotificacionRemotaALocal(
       'es_alerta_semaforo': _aEnteroSqlite(remoto['es_alerta_semaforo']),
       'updated_at': remoto['updated_at'],
       'sync_status': 'synced',
+    };
+
+Map<String, dynamic> mapearPlantillaLocalARemoto(Map<String, dynamic> local) =>
+    {
+      'id': local['id'],
+      'usuario_id': local['usuario_id'],
+      'tipo': local['tipo'],
+      'nombre': local['nombre'],
+      'deleted_at': local['deleted_at'],
+    };
+
+Map<String, dynamic> mapearPlantillaRemotaALocal(Map<String, dynamic> remoto) =>
+    {
+      'id': remoto['id'],
+      'usuario_id': remoto['usuario_id'],
+      'tipo': remoto['tipo'],
+      'nombre': remoto['nombre'],
+      'updated_at': remoto['updated_at'],
+      'sync_status': 'synced',
+      'deleted_at': remoto['deleted_at'],
     };

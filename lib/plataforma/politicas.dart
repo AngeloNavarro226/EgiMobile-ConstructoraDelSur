@@ -66,4 +66,21 @@ class Politicas {
   /// Indica si el rol visualiza todas las obras activas de la empresa.
   bool puedeVerTodasLasObras(RolUsuario rol) =>
       rol == RolUsuario.ingeniero || rol == RolUsuario.duenio;
+
+  /// Indica si el [usuario] puede elegir manualmente la tarea actual en curso
+  /// de [obra]: únicamente el capataz responsable o el ingeniero a cargo.
+  bool puedeElegirTareaActual(Usuario? usuario, Obra obra) {
+    if (usuario == null || obra.finalizada || obra.tareasPendientes.isEmpty) {
+      return false;
+    }
+    if (usuario.rol.tipo == RolUsuario.capataz) {
+      return obra.responsableId == usuario.id;
+    }
+    if (usuario.rol.tipo == RolUsuario.ingeniero) {
+      return obra.ingenieroId == usuario.id ||
+          obra.ingenieroId == null ||
+          obra.responsableId == usuario.id;
+    }
+    return false;
+  }
 }

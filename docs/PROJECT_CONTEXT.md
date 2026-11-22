@@ -37,13 +37,13 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 
 ---
 
-## 3. Esquema SQLite Local Actual (`constructora_del_sur_v4.db`, v2 con `onUpgrade`, 3FN + FKs)
+## 3. Esquema SQLite Local Actual (`constructora_del_sur_v4.db`, v4 con `onUpgrade`, 3FN + FKs)
 
-12 tablas relacionales normalizadas en `lib/data/services/base_datos_local_service.dart` con `PRAGMA foreign_keys = ON` e índices sobre todas las FKs y `sync_status`:
+13 tablas relacionales normalizadas en `lib/data/services/base_datos_local_service.dart` con `PRAGMA foreign_keys = ON` e índices sobre todas las FKs y `sync_status`:
 
 1. `roles` (`id` PK, `codigo` UNIQUE, `nombre`) — catálogo con los 3 roles (`rol_ingeniero`, `rol_capataz`, `rol_duenio`).
 2. `usuarios` (`id` PK, `username` UNIQUE, `rol_id` FK → `roles.id` [relación 1:N], `nombre`, `contrasenia`, `telefono`, `updated_at`, `sync_status`).
-3. `obras` (`id` PK, `nombre`, `estado_semaforo`, `fecha_ultimo_reporte`, `responsable_id` FK → `usuarios.id`, `ubicacion_latitud`, `ubicacion_longitud`, `ubicacion_direccion`, `observaciones`, `con_foto`, `imagen`, `imagen_url`, `finalizada`, `updated_at`, `sync_status`, `deleted_at`).
+3. `obras` (`id` PK, `nombre`, `estado_semaforo`, `fecha_ultimo_reporte`, `responsable_id` FK → `usuarios.id`, `ingeniero_id` nullable FK → `usuarios.id` `ON DELETE SET NULL`, `tarea_actual_id` nullable FK → `tareas_obra.id` `ON DELETE SET NULL`, `ubicacion_latitud`, `ubicacion_longitud`, `ubicacion_direccion`, `observaciones`, `con_foto`, `imagen`, `imagen_url`, `finalizada`, `updated_at`, `sync_status`, `deleted_at`).
 4. `tareas_obra` (`id` PK, `obra_id` FK → `obras.id` `ON DELETE CASCADE`, `nombre`, `completada`, `orden`, `updated_at`, `sync_status`).
 5. `obra_materiales` (`id` PK AUTOINCREMENT, `obra_id` FK → `obras.id` `ON DELETE CASCADE`, `nombre`).
 6. `reportes_diarios` (`id` PK, `obra_id` FK → `obras.id` `ON DELETE CASCADE`, `autor_id` FK → `usuarios.id` `ON DELETE RESTRICT`, `fecha_creacion_local`, `fecha_sincronizacion`, `tarea_seleccionada`, `tarea_completada`, `observaciones`, `estado_semaforo`, `sync_status` [`pending`|`synced`|`error`], `obra_finalizada`, `updated_at`).
@@ -53,12 +53,13 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 10. `configuracion_recordatorio` (`id` PK, `activo`, `hora`, `minuto`).
 11. `estado_sincronizacion` (`id` PK, `ultima_sync_utc`) — cursor UTC para *Pull* incremental.
 12. `cola_sincronizacion` (`id` PK, `entidad`, `entidad_id`, `operacion`, `reintentos`, `ultimo_error`, `creado_en`) — trazabilidad de reintentos Push.
+13. `catalogo_plantillas` (`id` PK, `usuario_id` FK → `usuarios.id` `ON DELETE CASCADE`, `tipo` [`tarea`|`material`], `nombre`, `updated_at`, `sync_status`, `deleted_at`) — catálogo individual por ingeniero de tareas y materiales frecuentes.
 
 ### Esquema Remoto en Supabase (`EgiMobile`, `cgczsdbidvqykigxbgxg`, Postgres 17)
 
-- **9 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created`, y helpers RLS en esquema `private` (`private.usuario_actual_id`, `private.rol_codigo_actual`, `private.puede_ver_obra`, `private.puede_gestionar_obra`): `roles` (3 roles sembrados), `usuarios` (`auth_user_id` FK → `auth.users`, 3 usuarios iniciales sembrados —1 por rol—, `telefono`, `fcm_token`, sin `contrasenia`), `obras`, `tareas_obra`, `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`, sin Base64), `notificaciones`.
+- **10 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created`, y helpers RLS en esquema `private` (`private.usuario_actual_id`, `private.rol_codigo_actual`, `private.puede_ver_obra`, `private.puede_gestionar_obra`): `roles` (3 roles sembrados), `usuarios` (`auth_user_id` FK → `auth.users`, 3 usuarios iniciales sembrados —1 por rol—, `telefono`, `fcm_token`, sin `contrasenia`), `obras` (`responsable_id`, `ingeniero_id` nullable FK → `usuarios.id`, `tarea_actual_id` nullable FK → `tareas_obra.id`), `tareas_obra`, `obra_materiales` (alta permitida a ingeniero y capataz responsable), `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`, sin Base64), `notificaciones`, `catalogo_plantillas` (RLS individual por `usuario_id`).
 - **Storage:** bucket privado `fotos-obras` (`file_size_limit = 204800`, JPEG/PNG/WebP) con políticas RLS por rol en `storage.objects`.
-- **Realtime:** publicación `supabase_realtime` habilitada para `obras`, `tareas_obra`, `reportes_diarios`, `reporte_fotos` y `notificaciones` (consumida vía `FuenteDatosRemota.escucharCambiosRemotos()` con debounce de 1200 ms + respaldo periódico cada 45 s solo en primer plano + `RefreshIndicator`).
+- **Realtime:** publicación `supabase_realtime` habilitada para `obras`, `tareas_obra`, `reportes_diarios`, `reporte_fotos`, `notificaciones` y `catalogo_plantillas` (consumida vía `FuenteDatosRemota.escucharCambiosRemotos()` con debounce de 1200 ms + respaldo periódico cada 45 s solo en primer plano + `RefreshIndicator`).
 - *(Las tablas `configuracion_recordatorio`, `estado_sincronizacion` y `cola_sincronizacion` son locales por dispositivo y no se replican en PostgreSQL.)*
 
 > **Nota técnica importante en `android/`:** En `proyectoegi/android/app/src/main/kotlin/` conviven `com/example/proyectoegi/MainActivity.kt` y `com/example/constructora_del_sur/{MainActivity.kt, Notificador.kt, RecordatorioReceiver.kt}`. Al configurar Firebase (`google-services.json`), verificar primero el `applicationId` exacto en `android/app/build.gradle.kt` y unificar si hay duplicación de `MainActivity.kt`.
@@ -68,7 +69,7 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 ## 4. Estado de Calidad y Red de Seguridad Actual
 
 - `analysis_options.yaml` exige 5 reglas extra sobre `flutter_lints`: `always_declare_return_types`, `directives_ordering`, `prefer_const_constructors`, `prefer_single_quotes`, `unawaited_futures` (`page_width: 80`).
-- **Tests existentes (4 archivos, 15 pruebas):**
+- **Tests existentes (4 archivos, 18 pruebas):**
   - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota`, `FakeServicioAutenticacionRemota`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
   - `test/plataforma_test.dart`: capacidades/políticas Android, iOS y Linux.
   - `test/caracterizacion_y_dominio_test.dart`: avance de `Obra`, autenticación + sesión offline + Supabase Auth fake, mapeo SQLite↔Postgres de `SupabaseRemoteService`, roles 1:N + columna `telefono` + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins* + idempotencia, filtro `Finalizadas`, auditoría de `notifyListeners()` y `dispose()` seguro en los 5 ViewModels, `NotificacionesRepository` con destinatarios dinámicos, horarios, geocodificación y `Workmanager`.
