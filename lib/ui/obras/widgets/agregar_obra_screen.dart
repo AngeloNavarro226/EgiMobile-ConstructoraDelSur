@@ -372,14 +372,21 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
               ),
             ),
             const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 4,
               children: [
                 const Text(
                   'Listado de tareas de la obra *',
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 TextButton.icon(
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
+                  ),
                   onPressed: () => _mostrarGestionCatalogo(TipoPlantilla.tarea),
                   icon: const Icon(Icons.bookmarks_outlined, size: 16),
                   label: const Text('Mis tareas guardadas'),
@@ -463,14 +470,21 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
               ),
             ],
             const SizedBox(height: 16),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 8,
+              runSpacing: 4,
               children: [
                 const Text(
                   'Materiales a utilizar (opcional)',
                   style: TextStyle(fontWeight: FontWeight.bold),
                 ),
                 TextButton.icon(
+                  style: TextButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    visualDensity: VisualDensity.compact,
+                  ),
                   onPressed: () =>
                       _mostrarGestionCatalogo(TipoPlantilla.material),
                   icon: const Icon(Icons.bookmarks_outlined, size: 16),

@@ -225,7 +225,8 @@ class SupabaseRemoteService implements FuenteDatosRemota {
           'ubicacion_longitud, ubicacion_direccion, observaciones, con_foto, '
           'imagen, imagen_url, finalizada, updated_at, deleted_at, '
           'obra_materiales(nombre), '
-          'tareas_obra(id, obra_id, nombre, completada, orden, updated_at)',
+          'tareas_obra!tareas_obra_obra_id_fkey('
+          'id, obra_id, nombre, completada, orden, updated_at)',
         );
     final obrasRaw = isoCursor != null
         ? await obrasQuery.gt('updated_at', isoCursor)

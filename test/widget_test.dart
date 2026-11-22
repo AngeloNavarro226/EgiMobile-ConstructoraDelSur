@@ -14,6 +14,7 @@ import 'package:constructora_del_sur/ui/exportar/view_models/exportar_view_model
 import 'package:constructora_del_sur/ui/notificaciones/view_models/notificaciones_view_model.dart';
 import 'package:constructora_del_sur/ui/notificaciones/widgets/notificaciones_ingeniero_screen.dart';
 import 'package:constructora_del_sur/ui/obras/view_models/obras_view_model.dart';
+import 'package:constructora_del_sur/ui/obras/widgets/agregar_obra_screen.dart';
 import 'package:constructora_del_sur/ui/obras/widgets/detalle_obra_sheet.dart';
 import 'package:constructora_del_sur/ui/perfil/view_models/perfil_view_model.dart';
 import 'package:flutter/material.dart';
@@ -281,6 +282,85 @@ void main() {
       expect(notifFalsas.recordatorioCancelado, isTrue);
 
       notifVm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  testWidgets(
+    'AgregarObraScreen renderiza sin overflow en pantalla angosta (360px)',
+    (tester) async {
+      tester.view.physicalSize = const Size(360, 800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+
+      final bus = BusDeEventos();
+      final db = BaseDatosLocalService();
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
+      );
+      final obrasVm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      await obrasVm.cargar(forzarRecarga: true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: AgregarObraScreen(
+              viewModel: obrasVm,
+              capacidades: const CapacidadesFalsas(),
+              onGuardado: () {},
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.text('Mis tareas guardadas'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Mis tareas guardadas'), findsOneWidget);
+
+      await tester.scrollUntilVisible(
+        find.text('Mis materiales guardados'),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+      expect(find.text('Mis materiales guardados'), findsOneWidget);
+
+      obrasVm.dispose();
       await notifFalsas.dispose();
       await bus.dispose();
     },
