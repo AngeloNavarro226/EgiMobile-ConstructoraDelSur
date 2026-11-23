@@ -11,6 +11,9 @@ import android.content.Intent
  */
 class RecordatorioReceiver : BroadcastReceiver() {
     override fun onReceive(contexto: Context, intent: Intent) {
+        // Reagenda siempre para mañana antes de evaluar si hoy hay pendientes.
+        RecordatorioAlarmas.reprogramarParaManiana(contexto)
+
         val nombreDb = intent.getStringExtra(RecordatorioAlarmas.EXTRA_NOMBRE_DB)
             ?: RecordatorioAlarmas.obtenerNombreBaseDatosGuardado(contexto)
 

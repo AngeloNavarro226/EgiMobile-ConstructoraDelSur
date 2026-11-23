@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.database.sqlite.SQLiteDatabase
+import android.os.Build
+import android.util.Log
 import java.util.Calendar
 
 /**
@@ -98,6 +100,35 @@ object RecordatorioAlarmas {
             titulo = titulo,
             mensaje = mensaje,
             nombreBaseDatos = nombreDb,
+            forzarDiaSiguiente = false,
+        )
+    }
+
+    /**
+     * Reprograma el recordatorio para el día siguiente tras dispararse la
+     * alarma de hoy (reemplaza `setInexactRepeating`, que en Android aplica una
+     * ventana de flexibilidad de hasta 18 horas).
+     */
+    fun reprogramarParaManiana(contexto: Context) {
+        val p = prefs(contexto)
+        if (!p.getBoolean(CLAVE_ACTIVO, false)) return
+        val hora = p.getInt(CLAVE_HORA, 18)
+        val minuto = p.getInt(CLAVE_MINUTO, 0)
+        val titulo = p.getString(CLAVE_TITULO, "Constructora Del Sur") ?: "Constructora Del Sur"
+        val mensaje = p.getString(
+            CLAVE_MENSAJE,
+            "Abrí la app para sincronizar los reportes del día.",
+        ) ?: "Abrí la app para sincronizar los reportes del día."
+        val nombreDb = p.getString(CLAVE_NOMBRE_DB, DB_POR_DEFECTO) ?: DB_POR_DEFECTO
+
+        agendarEnAlarmManager(
+            contexto = contexto,
+            hora = hora,
+            minuto = minuto,
+            titulo = titulo,
+            mensaje = mensaje,
+            nombreBaseDatos = nombreDb,
+            forzarDiaSiguiente = true,
         )
     }
 
@@ -122,10 +153,12 @@ object RecordatorioAlarmas {
         if (!archivoDb.exists()) return 0
 
         return try {
+            // Se abre en modo READWRITE (ejecutando solo SELECT) para compatibilidad
+            // completa con SQLite en modo WAL (-wal/-shm) y lectura de filas recientes.
             SQLiteDatabase.openDatabase(
                 archivoDb.path,
                 null,
-                SQLiteDatabase.OPEN_READONLY,
+                SQLiteDatabase.OPEN_READWRITE,
             ).use { db ->
                 db.rawQuery(
                     "SELECT COUNT(*) FROM reportes_diarios WHERE sync_status = ?",
@@ -134,7 +167,8 @@ object RecordatorioAlarmas {
                     if (cursor.moveToFirst()) cursor.getInt(0) else 0
                 }
             }
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w("RecordatorioAlarmas", "Error consultando reportes pending en $nombreBaseDatos", e)
             0
         }
     }
@@ -146,6 +180,7 @@ object RecordatorioAlarmas {
         titulo: String,
         mensaje: String,
         nombreBaseDatos: String,
+        forzarDiaSiguiente: Boolean = false,
     ) {
         val alarmas = contexto.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val proxima = Calendar.getInstance().apply {
@@ -153,15 +188,28 @@ object RecordatorioAlarmas {
             set(Calendar.MINUTE, minuto)
             set(Calendar.SECOND, 0)
             set(Calendar.MILLISECOND, 0)
-            if (timeInMillis <= System.currentTimeMillis()) {
+            if (forzarDiaSiguiente || timeInMillis <= System.currentTimeMillis()) {
                 add(Calendar.DAY_OF_YEAR, 1)
             }
         }
-        alarmas.setInexactRepeating(
-            AlarmManager.RTC_WAKEUP,
-            proxima.timeInMillis,
-            AlarmManager.INTERVAL_DAY,
-            construirPendingIntent(contexto, titulo, mensaje, nombreBaseDatos),
-        )
+        val operacion = construirPendingIntent(contexto, titulo, mensaje, nombreBaseDatos)
+        alarmas.cancel(operacion)
+
+        // `setAndAllowWhileIdle` no requiere el permiso restringido
+        // SCHEDULE_EXACT_ALARM en Android 12+, despierta en Doze y evita la
+        // ventana de 18 horas que Android impone a `setInexactRepeating` diario.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            alarmas.setAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                proxima.timeInMillis,
+                operacion,
+            )
+        } else {
+            alarmas.set(
+                AlarmManager.RTC_WAKEUP,
+                proxima.timeInMillis,
+                operacion,
+            )
+        }
     }
 }
