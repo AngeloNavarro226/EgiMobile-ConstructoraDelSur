@@ -200,12 +200,15 @@ class MultimediaService {
     if (kIsWeb) return;
     try {
       await Workmanager().registerOneOffTask(
-        'upload_${_reloj.ahora().toUtc().millisecondsSinceEpoch}_${_generadorIds.generar()}',
         tareaSubidaFotosWorkmanager,
+        tareaSubidaFotosWorkmanager,
+        existingWorkPolicy: ExistingWorkPolicy.replace,
+        initialDelay: const Duration(seconds: 45),
         inputData: {
           'rutaLocal': foto.rutaLocal,
           'origen': foto.origen,
           'pesoKb': foto.pesoKb,
+          'encoladoEn': _reloj.ahora().toUtc().toIso8601String(),
         },
         constraints: Constraints(networkType: NetworkType.connected),
       );

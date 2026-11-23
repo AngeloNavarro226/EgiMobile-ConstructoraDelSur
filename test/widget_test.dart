@@ -15,6 +15,7 @@ import 'package:constructora_del_sur/ui/notificaciones/view_models/notificacione
 import 'package:constructora_del_sur/ui/notificaciones/widgets/notificaciones_ingeniero_screen.dart';
 import 'package:constructora_del_sur/ui/obras/view_models/obras_view_model.dart';
 import 'package:constructora_del_sur/ui/obras/widgets/agregar_obra_screen.dart';
+import 'package:constructora_del_sur/ui/obras/widgets/crear_informe_screen.dart';
 import 'package:constructora_del_sur/ui/obras/widgets/detalle_obra_sheet.dart';
 import 'package:constructora_del_sur/ui/perfil/view_models/perfil_view_model.dart';
 import 'package:flutter/material.dart';
@@ -359,6 +360,96 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
       expect(find.text('Mis materiales guardados'), findsOneWidget);
+
+      obrasVm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  testWidgets(
+    'CrearInformeScreen permite al Capataz guardar un informe diario y cierra la pantalla',
+    (tester) async {
+      final bus = BusDeEventos();
+      final db = BaseDatosLocalService();
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
+      );
+      final obrasVm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'capataz',
+        contrasenia: '1234',
+      );
+      await obrasVm.cargar(forzarRecarga: true);
+      final obraCapataz = obrasVm.obrasFiltradas.first;
+      final reportesAntes = obrasVm.reportes.length;
+      bool? resultadoPop;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: FilledButton(
+                  onPressed: () async {
+                    resultadoPop = await Navigator.push<bool>(
+                      context,
+                      MaterialPageRoute<bool>(
+                        builder: (_) => CrearInformeScreen(
+                          obra: obraCapataz,
+                          viewModel: obrasVm,
+                          capacidades: const CapacidadesFalsas(),
+                        ),
+                      ),
+                    );
+                  },
+                  child: const Text('Abrir informe'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Abrir informe'));
+      await tester.pumpAndSettle();
+
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('btn_guardar_informe_diario')),
+        250,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('btn_guardar_informe_diario')));
+      await tester.pumpAndSettle();
+
+      expect(resultadoPop, isTrue);
+      expect(obrasVm.reportes.length, reportesAntes + 1);
+      expect(obrasVm.mensajeError, isNull);
 
       obrasVm.dispose();
       await notifFalsas.dispose();

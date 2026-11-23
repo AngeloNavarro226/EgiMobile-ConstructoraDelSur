@@ -109,6 +109,13 @@ class BaseDatosLocalService {
             singleInstance: _instanciaUnica,
             onConfigure: (db) async {
               await db.execute('PRAGMA foreign_keys = ON');
+              try {
+                await db.rawQuery('PRAGMA busy_timeout = 5000');
+                await db.rawQuery('PRAGMA journal_mode = WAL');
+              } catch (_) {
+                // En entornos que no admitan WAL o busy_timeout se mantiene
+                // la configuración por defecto sin interrumpir la apertura.
+              }
             },
             onCreate: (db, version) async {
               await _crearTablasSql(db);
@@ -436,94 +443,90 @@ class BaseDatosLocalService {
   }
 
   /// Migración incremental v1 -> v2 preservando los datos locales existentes.
+  ///
+  /// Nota: `sqflite` ya envuelve `onUpgrade` en una transacción, por lo que
+  /// nunca debe abrirse una sub-transacción `db.transaction(...)` aquí.
   Future<void> _migrarV1AV2(Database db) async {
     final ahora = _ahoraUtcIso();
-    await db.execute('PRAGMA foreign_keys = OFF');
-    try {
-      await db.transaction((txn) async {
-        await txn.execute('''
-          CREATE TABLE usuarios_v2 (
-            id TEXT PRIMARY KEY,
-            username TEXT NOT NULL UNIQUE,
-            rol_id TEXT NOT NULL,
-            nombre TEXT NOT NULL,
-            contrasenia TEXT NOT NULL,
-            telefono TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL,
-            sync_status TEXT NOT NULL DEFAULT 'synced',
-            FOREIGN KEY (rol_id) REFERENCES roles(id)
-              ON UPDATE CASCADE
-              ON DELETE RESTRICT
-          )
-        ''');
-        await txn.execute(
-          '''
-          INSERT INTO usuarios_v2
-            (id, username, rol_id, nombre, contrasenia, telefono, updated_at, sync_status)
-          SELECT
-            id, username, rol_id, nombre, contrasenia, '', ?, 'synced'
-          FROM usuarios
-          ''',
-          [ahora],
-        );
-        await txn.execute('DROP TABLE usuarios');
-        await txn.execute('ALTER TABLE usuarios_v2 RENAME TO usuarios');
+    await db.execute('''
+      CREATE TABLE usuarios_v2 (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        rol_id TEXT NOT NULL,
+        nombre TEXT NOT NULL,
+        contrasenia TEXT NOT NULL,
+        telefono TEXT NOT NULL DEFAULT '',
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        FOREIGN KEY (rol_id) REFERENCES roles(id)
+          ON UPDATE CASCADE
+          ON DELETE RESTRICT
+      )
+    ''');
+    await db.execute(
+      '''
+      INSERT INTO usuarios_v2
+        (id, username, rol_id, nombre, contrasenia, telefono, updated_at, sync_status)
+      SELECT
+        id, username, rol_id, nombre, contrasenia, '', ?, 'synced'
+      FROM usuarios
+      ''',
+      [ahora],
+    );
+    await db.execute('DROP TABLE usuarios');
+    await db.execute('ALTER TABLE usuarios_v2 RENAME TO usuarios');
 
-        await txn.execute('ALTER TABLE obras ADD COLUMN imagen_url TEXT');
-        await txn.execute(
-          "ALTER TABLE obras ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
-        );
-        await txn.execute(
-          "ALTER TABLE obras ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
-        );
-        await txn.execute('ALTER TABLE obras ADD COLUMN deleted_at TEXT');
+    await db.execute('ALTER TABLE obras ADD COLUMN imagen_url TEXT');
+    await db.execute(
+      "ALTER TABLE obras ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+    );
+    await db.execute(
+      "ALTER TABLE obras ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
+    );
+    await db.execute('ALTER TABLE obras ADD COLUMN deleted_at TEXT');
 
-        await txn.execute(
-          "ALTER TABLE tareas_obra ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
-        );
-        await txn.execute(
-          "ALTER TABLE tareas_obra ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
-        );
+    await db.execute(
+      "ALTER TABLE tareas_obra ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+    );
+    await db.execute(
+      "ALTER TABLE tareas_obra ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
+    );
 
-        await txn.execute(
-          "ALTER TABLE reportes_diarios ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
-        );
+    await db.execute(
+      "ALTER TABLE reportes_diarios ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+    );
 
-        await txn.execute(
-          'ALTER TABLE reporte_fotos ADD COLUMN url_remota TEXT',
-        );
-        await txn.execute(
-          "ALTER TABLE reporte_fotos ADD COLUMN estado_subida TEXT NOT NULL DEFAULT 'synced'",
-        );
+    await db.execute(
+      'ALTER TABLE reporte_fotos ADD COLUMN url_remota TEXT',
+    );
+    await db.execute(
+      "ALTER TABLE reporte_fotos ADD COLUMN estado_subida TEXT NOT NULL DEFAULT 'synced'",
+    );
 
-        await txn.execute(
-          "ALTER TABLE notificaciones ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
-        );
-        await txn.execute(
-          "ALTER TABLE notificaciones ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
-        );
+    await db.execute(
+      "ALTER TABLE notificaciones ADD COLUMN updated_at TEXT NOT NULL DEFAULT '$ahora'",
+    );
+    await db.execute(
+      "ALTER TABLE notificaciones ADD COLUMN sync_status TEXT NOT NULL DEFAULT 'synced'",
+    );
 
-        await txn.execute('''
-          CREATE TABLE IF NOT EXISTS estado_sincronizacion (
-            id INTEGER PRIMARY KEY,
-            ultima_sync_utc TEXT
-          )
-        ''');
-        await txn.execute('''
-          CREATE TABLE IF NOT EXISTS cola_sincronizacion (
-            id TEXT PRIMARY KEY,
-            entidad TEXT NOT NULL,
-            entidad_id TEXT NOT NULL,
-            operacion TEXT NOT NULL,
-            reintentos INTEGER NOT NULL DEFAULT 0,
-            ultimo_error TEXT,
-            creado_en TEXT NOT NULL
-          )
-        ''');
-      });
-    } finally {
-      await db.execute('PRAGMA foreign_keys = ON');
-    }
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS estado_sincronizacion (
+        id INTEGER PRIMARY KEY,
+        ultima_sync_utc TEXT
+      )
+    ''');
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS cola_sincronizacion (
+        id TEXT PRIMARY KEY,
+        entidad TEXT NOT NULL,
+        entidad_id TEXT NOT NULL,
+        operacion TEXT NOT NULL,
+        reintentos INTEGER NOT NULL DEFAULT 0,
+        ultimo_error TEXT,
+        creado_en TEXT NOT NULL
+      )
+    ''');
   }
 
   /// Migración incremental v2 -> v3: agrega `obras.ingeniero_id` (FK opcional a
@@ -562,6 +565,8 @@ class BaseDatosLocalService {
   /// Migración incremental v4 -> v5: agrega `usuarios.fcm_token`,
   /// `notificaciones.emisor_id` y migra `configuracion_recordatorio` a un
   /// registro sincronizable por ingeniero (`ingeniero_id` PK).
+  ///
+  /// Nota: `onUpgrade` ya corre dentro de una transacción de `sqflite`.
   Future<void> _migrarV4AV5(Database db) async {
     final ahora = _ahoraUtcIso();
     await db.execute('ALTER TABLE usuarios ADD COLUMN fcm_token TEXT');
@@ -570,55 +575,47 @@ class BaseDatosLocalService {
       'REFERENCES usuarios(id) ON UPDATE CASCADE ON DELETE SET NULL',
     );
 
-    await db.execute('PRAGMA foreign_keys = OFF');
-    try {
-      await db.transaction((txn) async {
-        final previa = await txn.query('configuracion_recordatorio', limit: 1);
-        final activo =
-            previa.isNotEmpty ? (previa.first['activo'] as int? ?? 1) : 1;
-        final hora =
-            previa.isNotEmpty ? (previa.first['hora'] as int? ?? 18) : 18;
-        final minuto =
-            previa.isNotEmpty ? (previa.first['minuto'] as int? ?? 0) : 0;
+    final previa = await db.query('configuracion_recordatorio', limit: 1);
+    final activo =
+        previa.isNotEmpty ? (previa.first['activo'] as int? ?? 1) : 1;
+    final hora = previa.isNotEmpty ? (previa.first['hora'] as int? ?? 18) : 18;
+    final minuto =
+        previa.isNotEmpty ? (previa.first['minuto'] as int? ?? 0) : 0;
 
-        await txn.execute('DROP TABLE IF EXISTS configuracion_recordatorio');
-        await txn.execute('''
-          CREATE TABLE configuracion_recordatorio (
-            ingeniero_id TEXT PRIMARY KEY,
-            activo INTEGER NOT NULL DEFAULT 1,
-            hora INTEGER NOT NULL DEFAULT 18,
-            minuto INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL,
-            sync_status TEXT NOT NULL DEFAULT 'synced',
-            FOREIGN KEY (ingeniero_id) REFERENCES usuarios(id)
-              ON UPDATE CASCADE
-              ON DELETE CASCADE
-          )
-        ''');
+    await db.execute('DROP TABLE IF EXISTS configuracion_recordatorio');
+    await db.execute('''
+      CREATE TABLE configuracion_recordatorio (
+        ingeniero_id TEXT PRIMARY KEY,
+        activo INTEGER NOT NULL DEFAULT 1,
+        hora INTEGER NOT NULL DEFAULT 18,
+        minuto INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        sync_status TEXT NOT NULL DEFAULT 'synced',
+        FOREIGN KEY (ingeniero_id) REFERENCES usuarios(id)
+          ON UPDATE CASCADE
+          ON DELETE CASCADE
+      )
+    ''');
 
-        final ingenieros = await txn.query(
-          'usuarios',
-          columns: ['id'],
-          where: 'rol_id = ?',
-          whereArgs: ['rol_ingeniero'],
-        );
-        for (final ing in ingenieros) {
-          await txn.insert(
-            'configuracion_recordatorio',
-            {
-              'ingeniero_id': ing['id'],
-              'activo': activo,
-              'hora': hora,
-              'minuto': minuto,
-              'updated_at': ahora,
-              'sync_status': 'synced',
-            },
-            conflictAlgorithm: ConflictAlgorithm.ignore,
-          );
-        }
-      });
-    } finally {
-      await db.execute('PRAGMA foreign_keys = ON');
+    final ingenieros = await db.query(
+      'usuarios',
+      columns: ['id'],
+      where: 'rol_id = ?',
+      whereArgs: ['rol_ingeniero'],
+    );
+    for (final ing in ingenieros) {
+      await db.insert(
+        'configuracion_recordatorio',
+        {
+          'ingeniero_id': ing['id'],
+          'activo': activo,
+          'hora': hora,
+          'minuto': minuto,
+          'updated_at': ahora,
+          'sync_status': 'synced',
+        },
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
     }
   }
 

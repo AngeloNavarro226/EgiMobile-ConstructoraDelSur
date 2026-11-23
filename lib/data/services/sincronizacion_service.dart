@@ -64,15 +64,18 @@ Future<bool> ejecutarTareaSincronizacion(
       nombreArchivo: BaseDatosLocalService.nombreArchivoSupabase,
       instanciaUnica: false,
     );
-    final motor = MotorSincronizacion(
-      baseDatosLocal: db,
-      fuenteRemota: SupabaseRemoteService(client: client),
-    );
-    final resultado = await motor.sincronizarTodo(
-      permitirSimulacionLocal: false,
-    );
-    await db.cerrar();
-    return !resultado.tuvoErrores;
+    try {
+      final motor = MotorSincronizacion(
+        baseDatosLocal: db,
+        fuenteRemota: SupabaseRemoteService(client: client),
+      );
+      final resultado = await motor.sincronizarTodo(
+        permitirSimulacionLocal: false,
+      );
+      return !resultado.tuvoErrores;
+    } finally {
+      await db.cerrar();
+    }
   } catch (_) {
     return false;
   }

@@ -40,18 +40,21 @@ class _CrearInformeScreenState extends State<CrearInformeScreen> {
   late EstadoObra _estadoSemaforo;
   bool _marcarTareaCompletada = true;
   bool _finalizarObra = false;
+  bool _guardando = false;
   final Set<String> _materialesSeleccionados = {};
   final List<FotoComprimida> _fotosAdjuntas = [];
   String _textoPrevioAlDictado = '';
 
   List<String> get _opcionesTareas {
-    final nombres = widget.obra.tareas.map((t) => t.nombre).toList();
+    final nombres = widget.obra.tareas.map((t) => t.nombre).toSet().toList();
     if (nombres.isEmpty) return ['Tarea general de obra'];
     return nombres;
   }
 
   List<String> get _opcionesMateriales {
-    if (widget.obra.materiales.isNotEmpty) return widget.obra.materiales;
+    if (widget.obra.materiales.isNotEmpty) {
+      return widget.obra.materiales.toSet().toList();
+    }
     return const [
       'Cemento Portland',
       'Hormigón H-21',
@@ -130,27 +133,42 @@ class _CrearInformeScreenState extends State<CrearInformeScreen> {
   }
 
   Future<void> _guardarInforme() async {
-    await widget.viewModel.guardarInformeDiario(
-      obra: widget.obra,
-      tareaSeleccionada: _tareaSeleccionada,
-      marcarTareaComoCompletada: _marcarTareaCompletada,
-      materialesGastados: _materialesSeleccionados.toList(),
-      observaciones: _controladorObservaciones.text,
-      estadoSemaforo: _estadoSemaforo,
-      fotosAdjuntas: _fotosAdjuntas,
-      finalizarObra: _finalizarObra,
-    );
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          _finalizarObra
-              ? 'Informe guardado y obra marcada como finalizada (visible bajo el filtro "Finalizadas")'
-              : 'Informe guardado en SQLite local (sync_status = pending)',
+    if (_guardando) return;
+    setState(() => _guardando = true);
+    try {
+      await widget.viewModel.guardarInformeDiario(
+        obra: widget.obra,
+        tareaSeleccionada: _tareaSeleccionada,
+        marcarTareaComoCompletada: _marcarTareaCompletada,
+        materialesGastados: _materialesSeleccionados.toList(),
+        observaciones: _controladorObservaciones.text,
+        estadoSemaforo: _estadoSemaforo,
+        fotosAdjuntas: _fotosAdjuntas,
+        finalizarObra: _finalizarObra,
+      );
+      if (!mounted) return;
+      final error = widget.viewModel.mensajeError;
+      if (error != null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error)),
+        );
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            _finalizarObra
+                ? 'Informe guardado y obra marcada como finalizada (visible bajo el filtro "Finalizadas")'
+                : 'Informe guardado en SQLite local (sync_status = pending)',
+          ),
         ),
-      ),
-    );
-    Navigator.pop(context, true);
+      );
+      Navigator.pop(context, true);
+    } finally {
+      if (mounted) {
+        setState(() => _guardando = false);
+      }
+    }
   }
 
   @override
@@ -394,16 +412,31 @@ class _CrearInformeScreenState extends State<CrearInformeScreen> {
                   onEliminar: () => setState(() => _fotosAdjuntas.removeAt(i)),
                 ),
               const SizedBox(height: 24),
-              SizedBox(
-                height: 52,
-                child: FilledButton.icon(
-                  onPressed: _guardarInforme,
-                  icon: const Icon(Icons.save),
-                  label: Text(
-                    _finalizarObra
-                        ? 'Guardar informe y finalizar obra'
-                        : 'Guardar informe diario',
-                    style: const TextStyle(fontSize: 16),
+              SafeArea(
+                top: false,
+                child: SizedBox(
+                  height: 52,
+                  child: FilledButton.icon(
+                    key: const Key('btn_guardar_informe_diario'),
+                    onPressed: _guardando ? null : _guardarInforme,
+                    icon: _guardando
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.save),
+                    label: Text(
+                      _guardando
+                          ? 'Guardando informe...'
+                          : (_finalizarObra
+                              ? 'Guardar informe y finalizar obra'
+                              : 'Guardar informe diario'),
+                      style: const TextStyle(fontSize: 16),
+                    ),
                   ),
                 ),
               ),
