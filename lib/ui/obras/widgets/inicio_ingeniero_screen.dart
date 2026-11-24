@@ -4,16 +4,17 @@ import 'package:flutter/material.dart';
 
 import '../../../domain/models/obra.dart';
 import '../../../plataforma/capacidades.dart';
+import '../../core/barra_busqueda_obras.dart';
+import '../../core/estado_vacio_obras.dart';
 import '../../core/obra_card.dart';
 import '../../core/semaforo.dart';
 import '../view_models/obras_view_model.dart';
-import 'crear_informe_screen.dart';
 import 'detalle_obra_sheet.dart';
 
-/// Vista de inicio del Ingeniero con chips de semáforo interactivos, filtro
-/// de obras finalizadas y opción rápida para modificar el estado de las tareas
-/// sin necesidad de crear un informe.
-class InicioIngenieroScreen extends StatefulWidget {
+/// Vista de inicio del Ingeniero con búsqueda ampliada, ordenamiento, chips de
+/// semáforo interactivos, filtro de obras finalizadas y apertura directa del
+/// panel de detalle de obra.
+class InicioIngenieroScreen extends StatelessWidget {
   const InicioIngenieroScreen({
     super.key,
     required this.viewModel,
@@ -23,130 +24,15 @@ class InicioIngenieroScreen extends StatefulWidget {
   final ObrasViewModel viewModel;
   final Capacidades capacidades;
 
-  @override
-  State<InicioIngenieroScreen> createState() => _InicioIngenieroScreenState();
-}
-
-class _InicioIngenieroScreenState extends State<InicioIngenieroScreen> {
-  final TextEditingController _controladorBusqueda = TextEditingController();
-
-  @override
-  void dispose() {
-    _controladorBusqueda.dispose();
-    super.dispose();
-  }
-
-  void _alSeleccionarObra(Obra obra) {
-    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        duration: const Duration(seconds: 6),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${obra.nombre} · ${obra.estado.etiqueta} (${obra.porcentajeAvance}%)',
-              style: const TextStyle(fontWeight: FontWeight.bold),
-            ),
-            Text(
-              'Tarea actual: ${obra.tareaActual} · Resp: ${obra.responsableNombre}',
-              style: const TextStyle(fontSize: 12),
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 6,
-              runSpacing: 6,
-              children: [
-                FilledButton.tonal(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    unawaited(
-                      mostrarDialogoCambiarSemaforo(
-                        context: context,
-                        obra: obra,
-                        viewModel: widget.viewModel,
-                      ),
-                    );
-                  },
-                  child: const Text('Semáforo', style: TextStyle(fontSize: 11)),
-                ),
-                FilledButton.tonal(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    unawaited(
-                      mostrarDialogoModificarEstadoTareas(
-                        context: context,
-                        obra: obra,
-                        viewModel: widget.viewModel,
-                      ),
-                    );
-                  },
-                  child: const Text(
-                    'Estado de tareas',
-                    style: TextStyle(fontSize: 11),
-                  ),
-                ),
-                FilledButton.tonal(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    unawaited(
-                      mostrarDialogoAgregarTarea(
-                        context: context,
-                        obra: obra,
-                        viewModel: widget.viewModel,
-                      ),
-                    );
-                  },
-                  child: const Text('+ Tarea', style: TextStyle(fontSize: 11)),
-                ),
-                FilledButton.tonal(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    unawaited(
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute<void>(
-                          builder: (_) => CrearInformeScreen(
-                            obra: obra,
-                            viewModel: widget.viewModel,
-                            capacidades: widget.capacidades,
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                  child: const Text('Informe', style: TextStyle(fontSize: 11)),
-                ),
-                FilledButton(
-                  onPressed: () {
-                    ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                    _abrirPanelCompleto(obra);
-                  },
-                  child: const Text(
-                    'Ver detalles e historial',
-                    style: TextStyle(fontSize: 11),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-
-    _abrirPanelCompleto(obra);
-  }
-
-  void _abrirPanelCompleto(Obra obra) {
+  void _abrirPanelCompleto(BuildContext context, Obra obra) {
     unawaited(
       showModalBottomSheet<void>(
         context: context,
         isScrollControlled: true,
         builder: (_) => DetalleObraEnriquecidoSheet(
           obraId: obra.id,
-          viewModel: widget.viewModel,
-          capacidades: widget.capacidades,
+          viewModel: viewModel,
+          capacidades: capacidades,
           permiteEdicion: true,
         ),
       ),
@@ -156,104 +42,97 @@ class _InicioIngenieroScreenState extends State<InicioIngenieroScreen> {
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: widget.viewModel,
+      listenable: viewModel,
       builder: (context, _) {
-        final visibles = widget.viewModel.obrasFiltradas;
+        final visibles = viewModel.obrasFiltradas;
 
         return Column(
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-              child: TextField(
-                controller: _controladorBusqueda,
-                onChanged: widget.viewModel.actualizarBusqueda,
-                decoration: InputDecoration(
-                  hintText: 'Buscar obra...',
-                  prefixIcon: const Icon(Icons.search),
-                  filled: true,
-                  fillColor:
-                      Theme.of(context).colorScheme.surfaceContainerHighest,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 8),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(4),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
+            BarraBusquedaObras(
+              valorActual: viewModel.textoBusqueda,
+              ordenActual: viewModel.ordenObras,
+              onBuscar: viewModel.actualizarBusqueda,
+              onCambiarOrden: viewModel.cambiarOrdenObras,
+              hintText: 'Buscar obra, dirección, responsable...',
             ),
             ResumenSemaforoBar(
-              cantidadATiempo:
-                  widget.viewModel.cantidadPorEstado(EstadoObra.aTiempo),
+              cantidadATiempo: viewModel.cantidadPorEstado(EstadoObra.aTiempo),
               cantidadDemoradas:
-                  widget.viewModel.cantidadPorEstado(EstadoObra.demorada),
+                  viewModel.cantidadPorEstado(EstadoObra.demorada),
               cantidadConProblemas:
-                  widget.viewModel.cantidadPorEstado(EstadoObra.problemas),
-              cantidadFinalizadas: widget.viewModel.cantidadFinalizadas,
-              estadoSeleccionado: widget.viewModel.filtroEstadoSemaforo,
-              mostrarSoloFinalizadas: widget.viewModel.mostrarSoloFinalizadas,
-              onSeleccionarEstado: widget.viewModel.seleccionarFiltroSemaforo,
-              onAlternarFinalizadas: widget.viewModel.alternarFiltroFinalizadas,
+                  viewModel.cantidadPorEstado(EstadoObra.problemas),
+              cantidadFinalizadas: viewModel.cantidadFinalizadas,
+              estadoSeleccionado: viewModel.filtroEstadoSemaforo,
+              mostrarSoloFinalizadas: viewModel.mostrarSoloFinalizadas,
+              onSeleccionarEstado: viewModel.seleccionarFiltroSemaforo,
+              onAlternarFinalizadas: viewModel.alternarFiltroFinalizadas,
             ),
             Expanded(
-              child: widget.viewModel.estado == EstadoCargaObras.cargando
+              child: viewModel.estado == EstadoCargaObras.cargando
                   ? const Center(child: CircularProgressIndicator())
-                  : widget.viewModel.estado == EstadoCargaObras.error
+                  : viewModel.estado == EstadoCargaObras.error
                       ? Center(
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(
-                                widget.viewModel.mensajeError ??
-                                    'No se pudieron cargar las obras.',
-                                textAlign: TextAlign.center,
-                              ),
-                              const SizedBox(height: 12),
-                              FilledButton.tonal(
-                                onPressed: () => widget.viewModel
-                                    .cargar(forzarRecarga: true),
-                                child: const Text('Reintentar'),
-                              ),
-                            ],
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 24),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  viewModel.mensajeError ??
+                                      'No se pudieron cargar las obras.',
+                                  textAlign: TextAlign.center,
+                                ),
+                                const SizedBox(height: 12),
+                                FilledButton.tonal(
+                                  onPressed: () =>
+                                      viewModel.cargar(forzarRecarga: true),
+                                  child: const Text('Reintentar'),
+                                ),
+                              ],
+                            ),
                           ),
                         )
                       : RefreshIndicator(
-                          onRefresh: widget.viewModel.refrescarManual,
+                          onRefresh: viewModel.refrescarManual,
                           child: visibles.isEmpty
-                              ? ListView(
-                                  physics:
-                                      const AlwaysScrollableScrollPhysics(),
-                                  children: [
-                                    SizedBox(
-                                      height:
-                                          MediaQuery.of(context).size.height *
-                                              0.45,
-                                      child: Center(
-                                        child: Text(
-                                          widget.viewModel
-                                                  .mostrarSoloFinalizadas
-                                              ? 'Aún no hay obras marcadas como finalizadas'
-                                              : 'No hay obras que coincidan con el filtro',
-                                        ),
-                                      ),
-                                    ),
-                                  ],
+                              ? EstadoVacioObras(
+                                  icono: viewModel.mostrarSoloFinalizadas
+                                      ? Icons.task_alt
+                                      : Icons.apartment_outlined,
+                                  mensaje: viewModel.mostrarSoloFinalizadas
+                                      ? 'Aún no hay obras marcadas como finalizadas.'
+                                      : (viewModel.tieneFiltrosActivos
+                                          ? 'No hay obras que coincidan con el filtro aplicado.'
+                                          : 'Todavía no hay obras registradas.'),
+                                  subtitulo: viewModel.tieneFiltrosActivos
+                                      ? 'Probá limpiar la búsqueda o cambiar el estado de semáforo.'
+                                      : 'Podés crear una nueva obra desde la pestaña "Agregar Obras".',
+                                  onLimpiarFiltros:
+                                      viewModel.tieneFiltrosActivos
+                                          ? viewModel.limpiarFiltrosYBusqueda
+                                          : null,
                                 )
                               : GridView.builder(
                                   physics:
                                       const AlwaysScrollableScrollPhysics(),
                                   padding: const EdgeInsets.all(16),
                                   gridDelegate:
-                                      const SliverGridDelegateWithFixedCrossAxisCount(
-                                    crossAxisCount: 2,
-                                    crossAxisSpacing: 20,
+                                      const SliverGridDelegateWithMaxCrossAxisExtent(
+                                    maxCrossAxisExtent: 240,
+                                    crossAxisSpacing: 16,
                                     mainAxisSpacing: 16,
-                                    childAspectRatio: 0.76,
+                                    childAspectRatio: 0.72,
                                   ),
                                   itemCount: visibles.length,
                                   itemBuilder: (context, i) => ObraCard(
                                     obra: visibles[i],
-                                    onTap: () =>
-                                        _alSeleccionarObra(visibles[i]),
+                                    ahora: viewModel.ahora,
+                                    reportesPendientes: viewModel
+                                        .cantidadReportesPendientesDeObra(
+                                      visibles[i].id,
+                                    ),
+                                    onTap: () => _abrirPanelCompleto(
+                                        context, visibles[i]),
                                   ),
                                 ),
                         ),

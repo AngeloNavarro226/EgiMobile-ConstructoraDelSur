@@ -117,8 +117,8 @@ class PerfilViewModel extends ViewModelBase {
     }
   }
 
-  /// Dispara la detección de conexión a internet para ejecutar sincronización.
-  Future<void> simularConexionInternet() async {
+  /// Dispara una sincronización manual mediante el servicio de conectividad.
+  Future<void> sincronizarManualmente() async {
     await _sincronizacionService.dispararDeteccionDeInternet();
   }
 }

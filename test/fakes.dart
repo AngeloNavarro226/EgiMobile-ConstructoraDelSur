@@ -144,8 +144,9 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
     final tsEntrante = _parsearFechaUtc(
       obra['client_updated_at'] ?? obra['updated_at'],
     );
-    final finalizada = _esVerdadero(existente['finalizada']) ||
+    final finalizadaMonotonica = _esVerdadero(existente['finalizada']) ||
         _esVerdadero(obra['finalizada']);
+    final finalizadaNueva = _esVerdadero(obra['finalizada']);
     final conFoto =
         _esVerdadero(existente['con_foto']) || _esVerdadero(obra['con_foto']);
     final fechaRepExistente =
@@ -158,19 +159,20 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
     if (tsEntrante.isBefore(tsExistente)) {
       obrasRemotas[id] = {
         ...existente,
-        'finalizada': finalizada ? 1 : 0,
+        'finalizada': finalizadaMonotonica ? 1 : 0,
         'con_foto': conFoto ? 1 : 0,
         'fecha_ultimo_reporte': fechaUltimoReporte,
-        'tarea_actual_id': finalizada ? null : existente['tarea_actual_id'],
+        'tarea_actual_id':
+            finalizadaMonotonica ? null : existente['tarea_actual_id'],
       };
     } else {
       obrasRemotas[id] = {
         ...obra,
         'materiales': List<String>.from(materiales),
-        'finalizada': finalizada ? 1 : 0,
+        'finalizada': finalizadaNueva ? 1 : 0,
         'con_foto': conFoto ? 1 : 0,
         'fecha_ultimo_reporte': fechaUltimoReporte,
-        'tarea_actual_id': finalizada ? null : obra['tarea_actual_id'],
+        'tarea_actual_id': finalizadaNueva ? null : obra['tarea_actual_id'],
       };
     }
   }

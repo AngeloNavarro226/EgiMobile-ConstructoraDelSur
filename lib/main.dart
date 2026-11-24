@@ -167,13 +167,10 @@ Future<void> main() async {
     notificacionesRepository: notificacionesRepository,
   );
 
-  // Arranque Offline-First: cargar preferencias y restaurar sesión guardada.
-  // Los datos de obras/reportes/notificaciones se cargan tras confirmar sesión.
-  unawaited(
-    perfilViewModel.inicializarPreferencias().then((_) {
-      unawaited(autenticacionViewModel.restaurarSesion());
-    }),
-  );
+  // Arranque Offline-First: cargar preferencias antes del primer frame (tema
+  // oscuro y alertas) y restaurar la sesión guardada en segundo plano.
+  await perfilViewModel.inicializarPreferencias();
+  unawaited(autenticacionViewModel.restaurarSesion());
 
   runApp(
     ConstructoraApp(
@@ -276,12 +273,14 @@ class PantallaPrincipalPorRol extends StatefulWidget {
 
 class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
   int _indice = 0;
+  String? _ultimoUsuarioId;
   late final AppLifecycleListener _lifecycleListener;
   StreamSubscription<String>? _suscripcionToquesPush;
 
   @override
   void initState() {
     super.initState();
+    _ultimoUsuarioId = widget.autenticacionViewModel.usuarioActual?.id;
     _suscripcionToquesPush =
         widget.notificacionesViewModel.toques.listen(_manejarToqueNotificacion);
     _lifecycleListener = AppLifecycleListener(
@@ -323,6 +322,12 @@ class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
 
   @override
   Widget build(BuildContext context) {
+    final usuarioActualId = widget.autenticacionViewModel.usuarioActual?.id;
+    if (usuarioActualId != _ultimoUsuarioId) {
+      _ultimoUsuarioId = usuarioActualId;
+      _indice = 0;
+    }
+
     final rol = widget.autenticacionViewModel.usuarioActual?.rol.tipo ??
         RolUsuario.ingeniero;
 
@@ -339,11 +344,32 @@ class _PantallaPrincipalPorRolState extends State<PantallaPrincipalPorRol> {
                 visible: widget.obrasViewModel.mostrandoAlertaSincronizacion,
               ),
             ),
-            BarraNavegacionSuperior(
-              items: [for (final d in destinos) (d.icono, d.etiqueta)],
-              indice: indiceSeguro,
-              onSeleccion: (nuevoIndice) =>
-                  setState(() => _indice = nuevoIndice),
+            ListenableBuilder(
+              listenable: Listenable.merge([
+                widget.obrasViewModel,
+                widget.notificacionesViewModel,
+              ]),
+              builder: (context, _) {
+                final pendientes =
+                    widget.obrasViewModel.cantidadReportesPendientes;
+                final alertas =
+                    widget.notificacionesViewModel.notificaciones.length;
+                return BarraNavegacionSuperior(
+                  items: [
+                    for (final d in destinos)
+                      (
+                        d.icono,
+                        d.etiqueta,
+                        d.etiqueta == 'Alertas'
+                            ? alertas
+                            : (d.etiqueta == 'Perfil' ? pendientes : 0),
+                      ),
+                  ],
+                  indice: indiceSeguro,
+                  onSeleccion: (nuevoIndice) =>
+                      setState(() => _indice = nuevoIndice),
+                );
+              },
             ),
             Expanded(
               child: IndexedStack(
@@ -452,7 +478,7 @@ class _DestinoNavegacion {
   final Widget pantalla;
 }
 
-/// Barra superior con la estética original de la aplicación.
+/// Barra superior con la estética original de la aplicación y badges en vivo.
 class BarraNavegacionSuperior extends StatelessWidget {
   const BarraNavegacionSuperior({
     super.key,
@@ -461,7 +487,7 @@ class BarraNavegacionSuperior extends StatelessWidget {
     required this.onSeleccion,
   });
 
-  final List<(IconData, String)> items;
+  final List<(IconData, String, int)> items;
   final int indice;
   final ValueChanged<int> onSeleccion;
 
@@ -483,10 +509,16 @@ class BarraNavegacionSuperior extends StatelessWidget {
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(
-                        items[i].$1,
-                        color:
-                            i == indice ? colores.primary : colores.onSurface,
+                      Badge(
+                        isLabelVisible: items[i].$3 > 0,
+                        label: Text(
+                          items[i].$3 > 99 ? '99+' : '${items[i].$3}',
+                        ),
+                        child: Icon(
+                          items[i].$1,
+                          color:
+                              i == indice ? colores.primary : colores.onSurface,
+                        ),
                       ),
                       const SizedBox(height: 2),
                       Text(

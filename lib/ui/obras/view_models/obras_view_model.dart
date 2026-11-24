@@ -12,6 +12,7 @@ import '../../../data/services/reloj.dart';
 import '../../../data/services/sincronizacion_service.dart';
 import '../../../data/services/voz_a_texto_service.dart';
 import '../../../domain/models/evento_de_app.dart';
+import '../../../domain/models/formato_fecha.dart';
 import '../../../domain/models/obra.dart';
 import '../../../domain/models/plantilla_obra.dart';
 import '../../../domain/models/reporte_diario.dart';
@@ -23,6 +24,21 @@ import '../../core/view_model_base.dart';
 
 /// Estado de carga para las pantallas de obras.
 enum EstadoCargaObras { cargando, exito, error }
+
+/// Criterio de ordenamiento para las vistas de listado/grilla de obras.
+enum OrdenObras {
+  urgenciaSemaforo,
+  masRecientes,
+  menorAvance,
+  nombreAZ;
+
+  String get etiqueta => switch (this) {
+        OrdenObras.urgenciaSemaforo => 'Urgencia (semáforo)',
+        OrdenObras.masRecientes => 'Último reporte',
+        OrdenObras.menorAvance => 'Menor avance',
+        OrdenObras.nombreAZ => 'Nombre (A–Z)',
+      };
+}
 
 /// ViewModel que administra la visualización y acciones sobre las obras y sus
 /// informes diarios, respetando los permisos de cada rol (Capataz, Ingeniero, Dueño).
@@ -95,6 +111,7 @@ class ObrasViewModel extends ViewModelBase {
   String _textoBusqueda = '';
   EstadoObra? _filtroEstadoSemaforo;
   bool _mostrarSoloFinalizadas = false;
+  OrdenObras _ordenObras = OrdenObras.urgenciaSemaforo;
   bool _mostrandoAlertaSincronizacion = false;
   bool _escuchandoDictadoVoz = false;
   bool _procesandoFoto = false;
@@ -121,6 +138,25 @@ class ObrasViewModel extends ViewModelBase {
 
   /// Último error reportado durante la sincronización Offline-First.
   String? get mensajeErrorSincronizacion => _mensajeErrorSincronizacion;
+
+  /// Texto de búsqueda actualmente aplicado.
+  String get textoBusqueda => _textoBusqueda;
+
+  /// Criterio de ordenamiento activo para la grilla/lista de obras.
+  OrdenObras get ordenObras => _ordenObras;
+
+  /// Indica si hay algún filtro de búsqueda, semáforo o finalizadas activo.
+  bool get tieneFiltrosActivos =>
+      _textoBusqueda.trim().isNotEmpty ||
+      _filtroEstadoSemaforo != null ||
+      _mostrarSoloFinalizadas;
+
+  /// Fecha/hora actual según el [Reloj] inyectado.
+  DateTime get ahora => _reloj.ahora();
+
+  /// Borrador de observaciones guardado localmente en preferencias.
+  String get borradorObservaciones =>
+      _preferenciasRepository?.borradorObservaciones ?? '';
 
   /// Filtro de estado de semáforo activo al tocar uno de los chips superiores.
   EstadoObra? get filtroEstadoSemaforo => _filtroEstadoSemaforo;
@@ -167,10 +203,10 @@ class ObrasViewModel extends ViewModelBase {
   bool puedeElegirTareaActual(Obra obra) =>
       _politicas.puedeElegirTareaActual(usuarioActual, obra);
 
-  /// Ubicación inicial sugerida para el selector de Google Maps.
+  /// Ubicación inicial sugerida para el selector de mapa.
   UbicacionObra get ubicacionPorDefecto => _mapaService.ubicacionPorDefecto;
 
-  /// Ubicaciones frecuentes en Mendoza para el selector de Google Maps.
+  /// Ubicaciones frecuentes en Mendoza para el selector de mapa.
   List<UbicacionObra> get ubicacionesSugeridas =>
       _mapaService.ubicacionesFrecuentes;
 
@@ -186,7 +222,14 @@ class ObrasViewModel extends ViewModelBase {
     );
   }
 
-  /// Obras filtradas según estado de finalización, semáforo y búsqueda.
+  static int _prioridadSemaforo(EstadoObra estado) => switch (estado) {
+        EstadoObra.problemas => 0,
+        EstadoObra.demorada => 1,
+        EstadoObra.aTiempo => 2,
+      };
+
+  /// Obras filtradas según estado de finalización, semáforo, búsqueda ampliada
+  /// (nombre, ubicación, responsable o tarea actual) y criterio de ordenamiento.
   List<Obra> get obrasFiltradas {
     Iterable<Obra> resultado = obrasVisiblesPorRol;
 
@@ -200,12 +243,40 @@ class ObrasViewModel extends ViewModelBase {
     }
 
     if (_textoBusqueda.trim().isNotEmpty) {
-      final consulta = _textoBusqueda.trim().toLowerCase();
-      resultado =
-          resultado.where((o) => o.nombre.toLowerCase().contains(consulta));
+      final consulta = normalizarTextoBusqueda(_textoBusqueda);
+      resultado = resultado.where((o) {
+        final campos = [
+          o.nombre,
+          o.ubicacion.direccion,
+          o.responsableNombre,
+          o.tareaActual,
+        ];
+        return campos.any(
+          (campo) => normalizarTextoBusqueda(campo).contains(consulta),
+        );
+      });
     }
 
-    return List.unmodifiable(resultado.toList());
+    final lista = resultado.toList();
+    lista.sort((a, b) => switch (_ordenObras) {
+          OrdenObras.urgenciaSemaforo => () {
+              final cmp = _prioridadSemaforo(a.estado)
+                  .compareTo(_prioridadSemaforo(b.estado));
+              if (cmp != 0) return cmp;
+              return b.fechaUltimoReporte.compareTo(a.fechaUltimoReporte);
+            }(),
+          OrdenObras.masRecientes =>
+            b.fechaUltimoReporte.compareTo(a.fechaUltimoReporte),
+          OrdenObras.menorAvance => () {
+              final cmp = a.avance.compareTo(b.avance);
+              if (cmp != 0) return cmp;
+              return a.nombre.toLowerCase().compareTo(b.nombre.toLowerCase());
+            }(),
+          OrdenObras.nombreAZ =>
+            a.nombre.toLowerCase().compareTo(b.nombre.toLowerCase()),
+        });
+
+    return List.unmodifiable(lista);
   }
 
   /// Todos los reportes diarios cargados localmente.
@@ -214,6 +285,14 @@ class ObrasViewModel extends ViewModelBase {
   /// Cantidad de reportes pendientes de sincronización (`sync_status = pending`).
   int get cantidadReportesPendientes => _reportes
       .where((r) => r.syncStatus == EstadoSincronizacion.pending)
+      .length;
+
+  /// Cantidad de reportes pendientes de sincronización para una obra puntual.
+  int cantidadReportesPendientesDeObra(String obraId) => _reportes
+      .where(
+        (r) =>
+            r.obraId == obraId && r.syncStatus == EstadoSincronizacion.pending,
+      )
       .length;
 
   /// Cuenta cuántas obras activas visibles para este rol tienen [estadoBuscado].
@@ -282,9 +361,15 @@ class ObrasViewModel extends ViewModelBase {
   }
 
   /// Guarda automáticamente el borrador de observaciones cuando la app pasa
-  /// a segundo plano (`onHide`).
+  /// a segundo plano (`onHide`) o el usuario decide guardarlo al salir.
   Future<void> guardarBorradorInforme(String texto) async {
     await _preferenciasRepository?.guardarBorradorObservaciones(texto);
+  }
+
+  /// Limpia el borrador de observaciones guardado localmente.
+  Future<void> descartarBorradorInforme() async {
+    await _preferenciasRepository?.limpiarBorradorObservaciones();
+    notificarSiActivo();
   }
 
   /// Carga las obras, reportes y responsables desde los repositorios,
@@ -318,10 +403,26 @@ class ObrasViewModel extends ViewModelBase {
     }
   }
 
-  /// Actualiza el filtro de búsqueda por nombre de obra.
+  /// Actualiza el filtro de búsqueda de obras.
   void actualizarBusqueda(String texto) {
     if (_textoBusqueda == texto) return;
     _textoBusqueda = texto;
+    notificarSiActivo();
+  }
+
+  /// Cambia el criterio de ordenamiento aplicado a las obras visibles.
+  void cambiarOrdenObras(OrdenObras nuevoOrden) {
+    if (_ordenObras == nuevoOrden) return;
+    _ordenObras = nuevoOrden;
+    notificarSiActivo();
+  }
+
+  /// Limpia búsqueda, filtro de semáforo y vista de finalizadas.
+  void limpiarFiltrosYBusqueda() {
+    if (!tieneFiltrosActivos) return;
+    _textoBusqueda = '';
+    _filtroEstadoSemaforo = null;
+    _mostrarSoloFinalizadas = false;
     notificarSiActivo();
   }
 
@@ -486,10 +587,15 @@ class ObrasViewModel extends ViewModelBase {
 
   /// Cambia el estado del semáforo de una obra y dispara una alerta proactiva
   /// si el nuevo estado es Amarillo (`demorada`) o Rojo (`problemas`).
+  ///
+  /// Bloqueado cuando la obra está finalizada (modo solo lectura).
   Future<void> cambiarEstadoSemaforo(
     String obraId,
     EstadoObra nuevoEstado,
   ) async {
+    final existente = obtenerObraPorId(obraId);
+    if (existente != null && existente.finalizada) return;
+
     _guardando = true;
     _mensajeError = null;
     notificarSiActivo();
@@ -525,9 +631,47 @@ class ObrasViewModel extends ViewModelBase {
     }
   }
 
+  /// Marca una obra como finalizada o la reabre (`finalizada = false`),
+  /// quitándola del modo solo lectura y disparando sincronización.
+  Future<bool> cambiarObraFinalizada(
+    String obraId, {
+    required bool finalizada,
+  }) async {
+    _guardando = true;
+    _mensajeError = null;
+    notificarSiActivo();
+
+    try {
+      final actualizada = await _obrasRepository.cambiarObraFinalizada(
+        obraId,
+        finalizada: finalizada,
+      );
+      if (actualizada == null) {
+        _guardando = false;
+        notificarSiActivo();
+        return false;
+      }
+      _todasLasObras = await _obrasRepository.obtenerObras(forzarRecarga: true);
+      await _reprogramarRecordatorioLocal();
+      _guardando = false;
+      notificarSiActivo();
+      unawaited(iniciarSincronizacionSilenciosa());
+      return true;
+    } catch (e) {
+      _guardando = false;
+      _mensajeError = 'No se pudo actualizar el estado de la obra: $e';
+      notificarSiActivo();
+      return false;
+    }
+  }
+
   /// Añade una nueva tarea a una obra mediante inserción granular.
+  /// Bloqueado cuando la obra está finalizada.
   Future<void> agregarTareaAObra(String obraId, String nombreTarea) async {
     if (nombreTarea.trim().isEmpty) return;
+    final existente = obtenerObraPorId(obraId);
+    if (existente != null && existente.finalizada) return;
+
     _guardando = true;
     _mensajeError = null;
     notificarSiActivo();
@@ -546,7 +690,11 @@ class ObrasViewModel extends ViewModelBase {
   }
 
   /// Marca una tarea como completada o pendiente de forma atómica.
+  /// Bloqueado cuando la obra está finalizada.
   Future<void> alternarTareaCompletada(String obraId, String tareaId) async {
+    final existente = obtenerObraPorId(obraId);
+    if (existente != null && existente.finalizada) return;
+
     _guardando = true;
     _mensajeError = null;
     notificarSiActivo();
@@ -589,11 +737,15 @@ class ObrasViewModel extends ViewModelBase {
   }
 
   /// Añade un material nuevo a una obra en curso y dispara sincronización.
+  /// Bloqueado cuando la obra está finalizada.
   Future<void> agregarMaterialAObra(
     String obraId,
     String nombreMaterial,
   ) async {
     if (nombreMaterial.trim().isEmpty) return;
+    final existente = obtenerObraPorId(obraId);
+    if (existente != null && existente.finalizada) return;
+
     _guardando = true;
     _mensajeError = null;
     notificarSiActivo();
@@ -739,6 +891,7 @@ class ObrasViewModel extends ViewModelBase {
   }
 
   /// Registra un informe diario de terreno con ID UUID v4 y fecha UTC.
+  /// Bloqueado cuando la obra está finalizada (modo solo lectura).
   Future<void> guardarInformeDiario({
     required Obra obra,
     required String tareaSeleccionada,
@@ -749,6 +902,14 @@ class ObrasViewModel extends ViewModelBase {
     required List<FotoComprimida> fotosAdjuntas,
     bool finalizarObra = false,
   }) async {
+    final actual = obtenerObraPorId(obra.id) ?? obra;
+    if (actual.finalizada) {
+      _mensajeError =
+          'Esta obra está finalizada. Reabrila para registrar nuevos informes.';
+      notificarSiActivo();
+      return;
+    }
+
     _guardando = true;
     _mensajeError = null;
     notificarSiActivo();
@@ -901,6 +1062,7 @@ class ObrasViewModel extends ViewModelBase {
         _textoBusqueda = '';
         _filtroEstadoSemaforo = null;
         _mostrarSoloFinalizadas = false;
+        _ordenObras = OrdenObras.urgenciaSemaforo;
         _mensajeError = null;
         _mensajeErrorSincronizacion = null;
         notificarSiActivo();

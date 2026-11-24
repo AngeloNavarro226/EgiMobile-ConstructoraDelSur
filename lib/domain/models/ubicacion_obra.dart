@@ -1,4 +1,4 @@
-/// Coordenadas geográficas y dirección de una obra seleccionada en Google Maps.
+/// Coordenadas geográficas y dirección de una obra seleccionada en el mapa.
 class UbicacionObra {
   const UbicacionObra({
     required this.latitud,

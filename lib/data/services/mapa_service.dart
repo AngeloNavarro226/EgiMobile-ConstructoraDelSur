@@ -5,7 +5,7 @@ import 'plataforma_io_stub.dart' if (dart.library.io) 'plataforma_io_real.dart';
 
 /// Servicio que provee ubicaciones geográficas de referencia en Mendoza y
 /// geocodificación inversa (transcripción del nombre del lugar a partir de
-/// las coordenadas seleccionadas en Google Maps).
+/// las coordenadas seleccionadas en el mapa).
 class MapaService {
   /// Ubicación inicial por defecto centrada en el Gran Mendoza.
   UbicacionObra get ubicacionPorDefecto => const UbicacionObra(
@@ -14,7 +14,7 @@ class MapaService {
         direccion: 'Av. San Martín 1100, Ciudad de Mendoza',
       );
 
-  /// Ubicaciones sugeridas para selección rápida o marcadores en Google Maps.
+  /// Ubicaciones sugeridas para selección rápida o marcadores en el mapa.
   List<UbicacionObra> get ubicacionesFrecuentes => const [
         UbicacionObra(
           latitud: -32.8489,
@@ -44,7 +44,7 @@ class MapaService {
       ];
 
   /// Transcribe el nombre del lugar y dirección a partir de las coordenadas
-  /// seleccionadas en Google Maps.
+  /// seleccionadas en el mapa.
   ///
   /// Primero consulta geocodificación inversa con un timeout de 3 segundos
   ///si el dispositivo está offline o sin red,

@@ -18,7 +18,7 @@ import '../view_models/obras_view_model.dart';
 /// - Responsable asignado (Capataces o el propio ingeniero que crea la obra)
 /// - Listado de tareas (obligatorio al menos 1) con catálogo personal rápido
 /// - Materiales a utilizar (opcional) con catálogo personal rápido
-/// - Ubicación de la obra seleccionada mediante Google Maps
+/// - Ubicación de la obra seleccionada en el mapa de calles
 class AgregarObraScreen extends StatefulWidget {
   const AgregarObraScreen({
     super.key,
@@ -49,6 +49,7 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
   bool _guardarTareaEnCatalogo = false;
   bool _guardarMaterialEnCatalogo = false;
   bool _responsableElegidoManualmente = false;
+  bool _guardando = false;
   String? _responsableIdSeleccionado;
   late UbicacionObra _ubicacionSeleccionada;
   EstadoObra _estado = EstadoObra.aTiempo;
@@ -180,6 +181,7 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
   }
 
   Future<void> _guardarObra() async {
+    if (_guardando) return;
     final nombreVacio = _controladorNombre.text.trim().isEmpty;
     final sinTareas = _tareas.isEmpty;
     if (nombreVacio || sinTareas) {
@@ -206,42 +208,52 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
     }
 
     final nombreCreado = _controladorNombre.text.trim();
-    await widget.viewModel.crearNuevaObra(
-      nombre: nombreCreado,
-      responsable: responsable,
-      nombresTareas: List.from(_tareas),
-      materiales: List.from(_materiales),
-      ubicacion: _ubicacionSeleccionada,
-      estadoInicial: _estado,
-      observaciones: _controladorObservaciones.text,
-      imagenPortadaPersonalizada:
-          _fotoPortada?.bytesBase64 ?? _fotoPortada?.rutaLocal,
-    );
+    setState(() => _guardando = true);
+    try {
+      await widget.viewModel.crearNuevaObra(
+        nombre: nombreCreado,
+        responsable: responsable,
+        nombresTareas: List.from(_tareas),
+        materiales: List.from(_materiales),
+        ubicacion: _ubicacionSeleccionada,
+        estadoInicial: _estado,
+        observaciones: _controladorObservaciones.text,
+        imagenPortadaPersonalizada:
+            _fotoPortada?.bytesBase64 ?? _fotoPortada?.rutaLocal,
+      );
 
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('"$nombreCreado" creada y en cola de sincronización'),
-      ),
-    );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '"$nombreCreado" creada correctamente. Se sincronizará automáticamente.',
+          ),
+        ),
+      );
 
-    _controladorNombre.clear();
-    _controladorNuevaTarea.clear();
-    _controladorNuevoMaterial.clear();
-    _controladorObservaciones.clear();
-    setState(() {
-      _tareas.clear();
-      _materiales.clear();
-      _errorNombre = null;
-      _errorTareas = null;
-      _estado = EstadoObra.aTiempo;
-      _fotoPortada = null;
-      _responsableElegidoManualmente = false;
-      _responsableIdSeleccionado =
-          disponibles.isNotEmpty ? disponibles.first.id : null;
-    });
+      _controladorNombre.clear();
+      _controladorNuevaTarea.clear();
+      _controladorNuevoMaterial.clear();
+      _controladorObservaciones.clear();
+      setState(() {
+        _tareas.clear();
+        _materiales.clear();
+        _errorNombre = null;
+        _errorTareas = null;
+        _estado = EstadoObra.aTiempo;
+        _fotoPortada = null;
+        _ubicacionSeleccionada = widget.viewModel.ubicacionPorDefecto;
+        _responsableElegidoManualmente = false;
+        _responsableIdSeleccionado =
+            disponibles.isNotEmpty ? disponibles.first.id : null;
+      });
 
-    widget.onGuardado();
+      widget.onGuardado();
+    } finally {
+      if (mounted) {
+        setState(() => _guardando = false);
+      }
+    }
   }
 
   @override
@@ -362,12 +374,12 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
               margin: EdgeInsets.zero,
               child: ListTile(
                 leading: const Icon(Icons.map_outlined),
-                title: const Text('Ubicación de la obra (Google Maps)'),
+                title: const Text('Ubicación de la obra'),
                 subtitle: Text(_ubicacionSeleccionada.etiquetaCompleta),
                 trailing: FilledButton.tonalIcon(
                   onPressed: _seleccionarUbicacionEnMapa,
                   icon: const Icon(Icons.pin_drop_outlined),
-                  label: const Text('Google Maps'),
+                  label: const Text('Elegir en mapa'),
                 ),
               ),
             ),
@@ -600,9 +612,18 @@ class _AgregarObraScreenState extends State<AgregarObraScreen> {
             ),
             const SizedBox(height: 24),
             FilledButton.icon(
-              onPressed: _guardarObra,
-              icon: const Icon(Icons.save),
-              label: const Text('Guardar obra'),
+              onPressed: _guardando ? null : _guardarObra,
+              icon: _guardando
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(Icons.save),
+              label: Text(_guardando ? 'Guardando obra...' : 'Guardar obra'),
             ),
           ],
         );

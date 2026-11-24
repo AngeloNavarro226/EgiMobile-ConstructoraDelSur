@@ -1,7 +1,7 @@
 # Contexto Compacto del Proyecto — Constructora Del Sur (`proyectoegi`)
 
 > **Propósito:** Memoria técnica compacta del proyecto (equivalente a `/compact`). Todo agente en Google Antigravity debe usar este documento como base de verdad del estado actual y del roadmap hacia producción.
-> **Última actualización:** 2026-11-23 · **Versión actual:** `2.3.0+1` (paquete `constructora_del_sur`, carpeta raíz `proyectoegi/`).
+> **Última actualización:** 2026-11-24 · **Versión actual:** `2.3.0+1` (paquete `constructora_del_sur`, carpeta raíz `proyectoegi/`).
 
 ---
 
@@ -16,20 +16,20 @@ Aplicación móvil Flutter para gestión de obras civiles e informes diarios de 
 
 ---
 
-## 2. Arquitectura Actual (v2.3.0 — 59 archivos en `lib/`, 4 en `test/`)
+## 2. Arquitectura Actual (v2.3.0 — 62 archivos en `lib/`, 4 en `test/`)
 
 Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de dependencias manual en `lib/main.dart`:
 
 1. **Capa de Presentación (`lib/ui/` + `lib/main.dart`):**
-   - Base común: `ViewModelBase` (`lib/ui/core/view_model_base.dart`) con `EstadoOperacion` y protección `notificarSiActivo()` contra `dispose()`. Todos los ViewModels notifican explícitamente en `cargando`, `exito` y `error`.
-   - `autenticacion/`: `AutenticacionViewModel` (incluye `restaurarSesion()` offline), `LoginScreen`.
-   - `obras/`: `ObrasViewModel` (carga perezosa de reportes por obra, operaciones granulares, reprogramación automática del recordatorio tras cargar/sincronizar, `Reloj` + `GeneradorIds`), `InicioIngenieroScreen`, `InicioCapatazScreen`, `InicioDuenioScreen`, `AgregarObraScreen`, `CrearInformeScreen`, `DetalleObraSheet`.
-   - `notificaciones/`: `NotificacionesViewModel` (refresco automático vía `BusDeEventos` y stream `toques`), `NotificacionesIngenieroScreen` (solo configuración del recordatorio diario por ingeniero + historial de alertas de semáforo; envío manual de prueba eliminado).
+   - Base común: `ViewModelBase` (`lib/ui/core/view_model_base.dart`) con `EstadoOperacion` y protección `notificarSiActivo()` contra `dispose()`. Todos los ViewModels notifican explícitamente en `cargando`, `exito` y `error`. `BarraNavegacionSuperior` muestra badges en vivo (Alertas + informes pendientes).
+   - `autenticacion/`: `AutenticacionViewModel` (incluye `restaurarSesion()` offline), `LoginScreen` (limpio para producción sin tarjeta demo, toggle de visibilidad de contraseña, foco teclado `next`→`done` y spinner).
+   - `obras/`: `ObrasViewModel` (búsqueda ampliada sin tildes, `OrdenObras`, bloqueo solo lectura en finalizadas + reapertura `cambiarObraFinalizada`, recuperación/descarte de borrador, carga perezosa de reportes, `Reloj` + `GeneradorIds`), `InicioIngenieroScreen`, `InicioCapatazScreen` (acciones rápidas en tarjeta, sin SnackBar efímero), `InicioDuenioScreen`, `AgregarObraScreen` (mapa OpenStreetMap exclusivo, sin Google Maps), `CrearInformeScreen` (recuperación de borrador, `PopScope`, estado de tareas Completa/En curso/Pendiente, materiales ad-hoc), `DetalleObraSheet` (modo solo lectura en finalizadas con botón `Reabrir obra`, copiar dirección y fechas 24hs en español).
+   - `notificaciones/`: `NotificacionesViewModel` (refresco automático vía `BusDeEventos` y stream `toques`), `NotificacionesIngenieroScreen` (selector de horario en formato 24hs + historial de alertas con fechas legibles).
    - `exportar/`: `ExportarViewModel` (generación CSV/JSON asíncrona en `Isolate.run`), `ExportarScreen`.
-   - `perfil/`: `PerfilViewModel` (`inicializarPreferencias()` + edición con `telefono`), `PerfilScreen`.
-   - `core/`: `ImagenLocalORemota` (archivo local → URL remota → Base64 → asset), `ObraCard`, `Semaforo`, `AlertaSincronizacionBanner`, `SelectorUbicacionMapaDialog`, `VisorFotoInforme`.
+   - `perfil/`: `PerfilViewModel` (`inicializarPreferencias()` aguardado antes del primer frame + edición con `telefono`), `PerfilScreen` (sincronización manual real + diálogo `_DialogoEditarPerfil` con validación y toggle de contraseña).
+   - `core/`: `ImagenLocalORemota`, `BarraBusquedaObras`, `EstadoVacioObras` (centrado), `ObraCard` (ripple, tiempo relativo y badge de pendientes), `Semaforo`, `AlertaSincronizacionBanner`, `SelectorUbicacionMapaDialog` (solo OpenStreetMap/`flutter_map`), `VisorFotoInforme`.
 2. **Capa de Dominio y Plataforma (`lib/domain/models/` y `lib/plataforma/`):**
-   - Modelos inmutables (`final` + `copyWith` + metadatos `updatedAt` UTC y `syncStatus`): `EstadoSincronizacion`, `Rol`, `RolUsuario`, `Usuario` (con `telefono`), `Obra` (con `ingenieroId`, `tareaActualId`, `imagenUrl` y `deletedAt`), `TareaObra`, `ReporteDiario`, `FotoComprimida` (con `urlRemota` y `estadoSubida`), `NotificacionApp` (con `emisorId`), `ProgramacionRecordatorio` (por `ingenieroId`), `Aviso`, `UbicacionObra`, `EventoDeApp`, `PlantillaObra`, `horarios.dart`.
+   - Modelos inmutables (`final` + `copyWith` + metadatos `updatedAt` UTC y `syncStatus`): `EstadoSincronizacion`, `Rol`, `RolUsuario`, `Usuario` (con `telefono`), `Obra` (con `ingenieroId`, `tareaActualId`, `imagenUrl` y `deletedAt`), `TareaObra`, `ReporteDiario`, `FotoComprimida` (con `urlRemota` y `estadoSubida`), `NotificacionApp` (con `emisorId`), `ProgramacionRecordatorio` (por `ingenieroId`), `Aviso`, `UbicacionObra`, `EventoDeApp`, `PlantillaObra`, `horarios.dart`, `formato_fecha.dart`.
    - `Capacidades` (`lib/plataforma/capacidades.dart`) y `Politicas` / `PoliticaDeAvisos` (`lib/plataforma/politicas.dart` — incluye `resolverDestinatariosAlertaSemaforo` y `resolverRecordatorioMasTemprano`).
 3. **Capa de Datos (`lib/data/repositories/` y `lib/data/services/`):**
    - Repositorios (fuente de verdad + caché en memoria + `limpiarCache()`): `AutenticacionRepository` (registra/rota/limpia `fcm_token`), `ObrasRepository`, `NotificacionesRepository` (alertas FCM por rol emisor + recordatorio por ingeniero sincronizado + reprogramación automática del equipo), `PreferenciasRepository` (persiste `usuario_sesion_id` y copia local del recordatorio en `SharedPreferencesAsync` con `allowList`).
@@ -57,7 +57,7 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 
 ### Esquema Remoto en Supabase (`EgiMobile`, `cgczsdbidvqykigxbgxg`, Postgres 17)
 
-- **11 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created` + resolución de conflictos LWW (`a_trg_obras_resolver_conflicto_lww` y `a_trg_tareas_obra_resolver_conflicto_lww` sobre `client_updated_at` con merge monotónico de `finalizada`, `con_foto` y `fecha_ultimo_reporte`), y helpers RLS en esquema `private`: `roles`, `usuarios` (`fcm_token`), `obras` (`responsable_id`, `ingeniero_id`, `tarea_actual_id`, `client_updated_at`), `tareas_obra` (`client_updated_at`), `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`), `notificaciones` (`emisor_id`, `push_enviado`), `catalogo_plantillas`, `configuracion_recordatorio` (`ingeniero_id` PK, RLS: ingeniero edita la propia, capataz lee la de los ingenieros de sus obras, dueño lee todas).
+- **11 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created` + resolución de conflictos LWW (`a_trg_obras_resolver_conflicto_lww` actualizado vía migración `permitir_reabrir_obra_en_lww` para permitir reabrir obras finalizadas cuando `entrante >= OLD.client_updated_at`, y `a_trg_tareas_obra_resolver_conflicto_lww`), y helpers RLS en esquema `private`: `roles`, `usuarios` (`fcm_token`), `obras` (`responsable_id`, `ingeniero_id`, `tarea_actual_id`, `client_updated_at`), `tareas_obra` (`client_updated_at`), `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`), `notificaciones` (`emisor_id`, `push_enviado`), `catalogo_plantillas`, `configuracion_recordatorio` (`ingeniero_id` PK, RLS: ingeniero edita la propia, capataz lee la de los ingenieros de sus obras, dueño lee todas).
 - **Edge Function FCM (`supabase/functions/enviar-push-fcm/index.ts`):** desplegada (`ACTIVE`), resuelve destinatarios en servidor (Capataz → Ingeniero a cargo + Dueño; Ingeniero → Capataz a cargo + Dueño), garantiza idempotencia vía `push_enviado` y despacha con FCM HTTP v1 API usando `FIREBASE_SERVICE_ACCOUNT_JSON`.
 - **Storage:** bucket privado `fotos-obras` (`file_size_limit = 204800`, JPEG/PNG/WebP) con políticas RLS por rol.
 - **Realtime:** publicación `supabase_realtime` habilitada para `obras`, `tareas_obra`, `reportes_diarios`, `reporte_fotos`, `notificaciones`, `catalogo_plantillas` y `configuracion_recordatorio`.
@@ -68,11 +68,11 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 ## 4. Estado de Calidad y Red de Seguridad Actual
 
 - `analysis_options.yaml` exige 5 reglas extra sobre `flutter_lints`: `always_declare_return_types`, `directives_ordering`, `prefer_const_constructors`, `prefer_single_quotes`, `unawaited_futures` (`page_width: 80`).
-- **Tests existentes (4 archivos, 25 pruebas en verde):**
-  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota` (con modo `resolverConflictosLww`), `FakeServicioAutenticacionRemota`, `FakeServicioPushFcm`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
+- **Tests existentes (4 archivos, 30 pruebas en verde):**
+  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota` (con modo `resolverConflictosLww` compatible con reapertura de obra), `FakeServicioAutenticacionRemota`, `FakeServicioPushFcm`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
   - `test/plataforma_test.dart`: capacidades/políticas Android, iOS y Linux.
-  - `test/caracterizacion_y_dominio_test.dart`: dominio de `Obra`, autenticación + sesión offline + Supabase Auth + ciclo de vida `fcm_token`, mapeo SQLite↔Postgres (`client_updated_at`), roles 1:N + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins* + resolución de conflictos offline LWW, Realtime, catálogo de plantillas + tarea actual, destinatarios FCM por rol emisor (Capataz vs Ingeniero), recordatorio por ingeniero + horario más temprano en Capataz + `SharedPreferences`, auditoría de ViewModels, horarios y `Workmanager`.
-  - `test/widget_test.dart`: `LoginScreen`, `PerfilScreen`, `DetalleObraEnriquecidoSheet`, `NotificacionesIngenieroScreen` (sin envío manual + switch de recordatorio diario), `AgregarObraScreen` (sin overflow en 360px) y `CrearInformeScreen` (guardado como Capataz).
+  - `test/caracterizacion_y_dominio_test.dart`: dominio de `Obra`, autenticación + sesión offline + Supabase Auth + ciclo de vida `fcm_token`, mapeo SQLite↔Postgres (`client_updated_at`), roles 1:N + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins* + resolución de conflictos offline LWW, Realtime, catálogo de plantillas + tarea actual, destinatarios FCM por rol emisor, recordatorio por ingeniero + horario más temprano en Capataz + `SharedPreferences`, auditoría de ViewModels, horarios, `formato_fecha`, búsqueda ampliada/ordenamiento y modo solo lectura + reapertura en finalizadas.
+  - `test/widget_test.dart`: `LoginScreen` (sin tarjeta demo + toggle contraseña), `PerfilScreen` (sincronización manual), `DetalleObraEnriquecidoSheet` (edición y modo solo lectura/reapertura en finalizadas), `NotificacionesIngenieroScreen` (reloj 24hs + recordatorio diario), `AgregarObraScreen` (360px sin overflow, mapa OSM), `CrearInformeScreen` (guardado, recuperación/descarte de borrador, indicador de estado de tareas y material ad-hoc) e `InicioCapatazScreen` (estado vacío centrado).
 
 ---
 
@@ -84,7 +84,7 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 | **Fase 1** | **Supabase como BD principal + Offline-First:** Tablas PostgreSQL + RLS + bucket `fotos-obras` + Auth + `SupabaseRemoteService` en `EgiMobile` (`cgczsdbidvqykigxbgxg`) | **Completado** | `supabase-offline-first` |
 | **Fase 2** | **Sincronización real en producción:** `Workmanager` + `connectivity_plus` + `AppLifecycleListener` + Realtime + LWW por `client_updated_at` | **Completado** | `sync-engine-implementation` |
 | **Fase 3** | **Notificaciones Push reales (Firebase FCM) + Recordatorio por Ingeniero:** FCM en producción (`egimobile-fc985`, `enviar-push-fcm` activo, `FIREBASE_SERVICE_ACCOUNT_JSON` configurado), destinatarios por rol emisor, `configuracion_recordatorio` por `ingeniero_id` con `setAndAllowWhileIdle` + lectura SQLite WAL | **Completado** | `firebase-push-notifications` |
-| **Fase 4** | **Limpieza de UI de versión de prueba:** Quitar `_TarjetaUsuariosPrueba` y `_autocompletarCredencialPrueba` de `login_screen.dart`, quitar botones de simulación y semillas demo en producción, y actualizar `test/widget_test.dart` | Pendiente | `ui-production-cleanup` |
+| **Fase 4** | **Limpieza de UI de versión de prueba + Mejoras QoL:** Eliminado `_TarjetaUsuariosPrueba`, `google_maps_flutter` y `API_KEY`; sincronización manual real en Perfil; reloj 24hs; modo solo lectura + reapertura en finalizadas; indicador de estado de tareas, borradores y materiales ad-hoc en informes; búsqueda ampliada/ordenamiento, badges y estados vacíos centrados | **Completado** | `ui-production-cleanup` |
 
 ---
 

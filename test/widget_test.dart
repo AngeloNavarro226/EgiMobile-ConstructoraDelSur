@@ -17,6 +17,7 @@ import 'package:constructora_del_sur/ui/obras/view_models/obras_view_model.dart'
 import 'package:constructora_del_sur/ui/obras/widgets/agregar_obra_screen.dart';
 import 'package:constructora_del_sur/ui/obras/widgets/crear_informe_screen.dart';
 import 'package:constructora_del_sur/ui/obras/widgets/detalle_obra_sheet.dart';
+import 'package:constructora_del_sur/ui/obras/widgets/inicio_capataz_screen.dart';
 import 'package:constructora_del_sur/ui/perfil/view_models/perfil_view_model.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -91,6 +92,14 @@ void main() {
       expect(find.text('Constructora Del Sur'), findsOneWidget);
       expect(find.byKey(const Key('boton_iniciar_sesion')), findsOneWidget);
 
+      // Limpieza producción: el selector demo de usuarios de prueba no existe
+      expect(find.text('ingeniero / 1234'), findsNothing);
+      expect(find.text('capataz / 1234'), findsNothing);
+      expect(
+        find.byKey(const Key('btn_toggle_visibilidad_contrasenia')),
+        findsOneWidget,
+      );
+
       await tester.tap(find.byKey(const Key('boton_iniciar_sesion')));
       await tester.pump();
 
@@ -99,7 +108,7 @@ void main() {
         findsOneWidget,
       );
 
-      // Ingresar como capataz y verificar teléfono visible en Perfil
+      // Ingresar como capataz y verificar teléfono y sincronización manual en Perfil
       await tester.enterText(
         find.byKey(const Key('campo_usuario')),
         'capataz',
@@ -115,6 +124,8 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('+54 9 261 555-0102'), findsOneWidget);
+      expect(find.text('Sincronización manual'), findsOneWidget);
+      expect(find.text('Simular detección de Internet'), findsNothing);
 
       await notifFalsas.dispose();
       await bus.dispose();
@@ -281,6 +292,16 @@ void main() {
       expect(notifVm.recordatorio.activo, isFalse);
       expect(prefsRepo.recordatorioLocal.activo, isFalse);
       expect(notifFalsas.recordatorioCancelado, isTrue);
+
+      // El selector de horario del recordatorio usa formato de 24hs (sin AM/PM)
+      await tester.tap(
+        find.byKey(const Key('btn_modificar_horario_recordatorio')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('AM'), findsNothing);
+      expect(find.text('PM'), findsNothing);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
 
       notifVm.dispose();
       await notifFalsas.dispose();
@@ -450,6 +471,284 @@ void main() {
       expect(resultadoPop, isTrue);
       expect(obrasVm.reportes.length, reportesAntes + 1);
       expect(obrasVm.mensajeError, isNull);
+
+      obrasVm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  testWidgets(
+    'CrearInformeScreen recupera borrador, muestra estado de tareas y permite agregar material ad-hoc',
+    (tester) async {
+      final bus = BusDeEventos();
+      final db = BaseDatosLocalService();
+      final prefsRepo = PreferenciasRepository();
+      await prefsRepo.guardarBorradorObservaciones('Borrador guardado en obra');
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        preferenciasRepository: prefsRepo,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
+      );
+      final obrasVm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        preferenciasRepository: prefsRepo,
+        busDeEventos: bus,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'capataz',
+        contrasenia: '1234',
+      );
+      await obrasVm.cargar(forzarRecarga: true);
+      final obraCapataz = obrasVm.obrasFiltradas.first;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: CrearInformeScreen(
+            obra: obraCapataz,
+            viewModel: obrasVm,
+            capacidades: const CapacidadesFalsas(),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Recuperación de borrador (banner visible arriba y texto en campo de observaciones)
+      expect(
+        find.byKey(const Key('banner_borrador_recuperado')),
+        findsOneWidget,
+      );
+
+      // Indicador de estado de tareas en dropdown
+      await tester.tap(find.byKey(const Key('dropdown_tarea_informe')));
+      await tester.pumpAndSettle();
+      expect(find.text('Completa'), findsWidgets);
+      expect(find.text('En curso'), findsWidgets);
+      // Cerrar menú desplegable tocando el elemento actual
+      await tester.tap(find.text(obraCapataz.tareaActual).last);
+      await tester.pumpAndSettle();
+
+      // Desplazar hasta el campo de observaciones y verificar el borrador cargado
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('campo_observaciones_informe')),
+        200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Borrador guardado en obra'), findsOneWidget);
+
+      // Material ad-hoc
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('campo_material_ad_hoc')),
+        -200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester
+          .ensureVisible(find.byKey(const Key('campo_material_ad_hoc')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('campo_material_ad_hoc')),
+        'Cal hidratada',
+      );
+      await tester.ensureVisible(
+        find.byKey(const Key('btn_agregar_material_ad_hoc')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('btn_agregar_material_ad_hoc')));
+      await tester.pumpAndSettle();
+      expect(
+        find.widgetWithText(FilterChip, 'Cal hidratada'),
+        findsOneWidget,
+      );
+
+      // Volver arriba y descartar el borrador recuperado
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('btn_descartar_borrador')),
+        -200,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('btn_descartar_borrador')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('banner_borrador_recuperado')),
+        findsNothing,
+      );
+
+      obrasVm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  testWidgets(
+    'DetalleObraEnriquecidoSheet bloquea edición en obras finalizadas y permite reabrirlas',
+    (tester) async {
+      final bus = BusDeEventos();
+      final db = BaseDatosLocalService();
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
+      );
+      final obrasVm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      await obrasVm.cargar(forzarRecarga: true);
+      await obrasVm.cambiarObraFinalizada('1', finalizada: true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DetalleObraEnriquecidoSheet(
+              obraId: '1',
+              viewModel: obrasVm,
+              capacidades: const CapacidadesFalsas(),
+              permiteEdicion: true,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Modo solo lectura activo y acciones bloqueadas
+      expect(
+        find.byKey(const Key('card_obra_finalizada_solo_lectura')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('segmented_semaforo_detalle')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const Key('btn_detalle_realizar_informe')),
+        findsNothing,
+      );
+
+      // Reabrir obra
+      await tester.ensureVisible(find.byKey(const Key('btn_reabrir_obra')));
+      await tester.tap(find.byKey(const Key('btn_reabrir_obra')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('btn_confirmar_reabrir_obra')));
+      await tester.pumpAndSettle();
+
+      expect(obrasVm.obtenerObraPorId('1')!.finalizada, isFalse);
+      expect(
+        find.byKey(const Key('segmented_semaforo_detalle')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('btn_detalle_realizar_informe')),
+        findsOneWidget,
+      );
+
+      obrasVm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
+    },
+  );
+
+  testWidgets(
+    'InicioCapatazScreen centra el mensaje vacío cuando no hay obras coincidentes y ofrece limpiar filtro',
+    (tester) async {
+      final bus = BusDeEventos();
+      final db = BaseDatosLocalService();
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
+      );
+      final obrasVm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'capataz',
+        contrasenia: '1234',
+      );
+      await obrasVm.cargar(forzarRecarga: true);
+      obrasVm.alternarFiltroFinalizadas(true);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: InicioCapatazScreen(
+              viewModel: obrasVm,
+              capacidades: const CapacidadesFalsas(),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final textoVacio = tester.widget<Text>(
+        find.text('No hay obras finalizadas asignadas a tu perfil.'),
+      );
+      expect(textoVacio.textAlign, TextAlign.center);
+      expect(
+        find.byKey(const Key('btn_limpiar_filtros_vacio')),
+        findsOneWidget,
+      );
 
       obrasVm.dispose();
       await notifFalsas.dispose();

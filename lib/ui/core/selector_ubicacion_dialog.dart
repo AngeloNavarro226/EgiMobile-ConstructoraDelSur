@@ -2,25 +2,13 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart' as gmaps;
 import 'package:latlong2/latlong.dart' as osm;
 
 import '../../domain/models/ubicacion_obra.dart';
 
-/// Motor de renderizado del mapa dentro del selector de ubicación.
-enum MotorMapaSelector {
-  /// Mapa real de calles con tiles de OpenStreetMap (funciona de inmediato en
-  /// Android, iOS y Web sin necesidad de configurar una API Key de pago).
-  mapaCallesSinApiKey,
-
-  /// Widget nativo `GoogleMap` de `google_maps_flutter` (requiere colocar la
-  /// API Key en `AndroidManifest.xml` / `web/index.html`).
-  googleMapsNativo,
-}
-
-/// Diálogo interactivo que ofrece ambas opciones de mapa (Mapa de Calles sin
-/// API Key y Google Maps SDK con API Key) y transcribe automáticamente el
-/// nombre del lugar al que apuntan las coordenadas seleccionadas.
+/// Diálogo interactivo de mapa de calles (OpenStreetMap) que permite marcar
+/// la ubicación de una obra y transcribe automáticamente el nombre del lugar
+/// a partir de las coordenadas seleccionadas.
 class SelectorUbicacionMapaDialog extends StatefulWidget {
   const SelectorUbicacionMapaDialog({
     super.key,
@@ -41,13 +29,11 @@ class SelectorUbicacionMapaDialog extends StatefulWidget {
 
 class _SelectorUbicacionMapaDialogState
     extends State<SelectorUbicacionMapaDialog> {
-  final MapController _controladorOsm = MapController();
-  gmaps.GoogleMapController? _controladorGoogleMap;
+  final MapController _controladorMapa = MapController();
 
   late double _latitud;
   late double _longitud;
   late TextEditingController _controladorDireccion;
-  MotorMapaSelector _motor = MotorMapaSelector.mapaCallesSinApiKey;
   bool _transcribiendoLugar = false;
 
   @override
@@ -63,7 +49,6 @@ class _SelectorUbicacionMapaDialogState
   @override
   void dispose() {
     _controladorDireccion.dispose();
-    _controladorGoogleMap?.dispose();
     super.dispose();
   }
 
@@ -82,17 +67,9 @@ class _SelectorUbicacionMapaDialogState
       }
     });
 
-    if (_motor == MotorMapaSelector.mapaCallesSinApiKey) {
-      try {
-        _controladorOsm.move(osm.LatLng(_latitud, _longitud), 14.5);
-      } catch (_) {}
-    } else {
-      unawaited(
-        _controladorGoogleMap?.animateCamera(
-          gmaps.CameraUpdate.newLatLng(gmaps.LatLng(_latitud, _longitud)),
-        ),
-      );
-    }
+    try {
+      _controladorMapa.move(osm.LatLng(_latitud, _longitud), 14.5);
+    } catch (_) {}
 
     if (direccionFija == null) {
       try {
@@ -125,112 +102,48 @@ class _SelectorUbicacionMapaDialogState
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              SegmentedButton<MotorMapaSelector>(
-                segments: const [
-                  ButtonSegment(
-                    value: MotorMapaSelector.mapaCallesSinApiKey,
-                    icon: Icon(Icons.map_outlined, size: 16),
-                    label: Text(
-                      'Mapa de Calles (Sin API Key)',
-                      style: TextStyle(fontSize: 11),
-                    ),
-                  ),
-                  ButtonSegment(
-                    value: MotorMapaSelector.googleMapsNativo,
-                    icon: Icon(Icons.pin_drop_outlined, size: 16),
-                    label: Text(
-                      'Google Maps SDK (Con API Key)',
-                      style: TextStyle(fontSize: 11),
-                    ),
-                  ),
-                ],
-                selected: {_motor},
-                onSelectionChanged: (s) => setState(() => _motor = s.first),
-              ),
-              const SizedBox(height: 10),
               SizedBox(
-                height: 250,
+                height: 260,
                 child: ClipRRect(
                   borderRadius: BorderRadius.circular(8),
                   child: Stack(
                     children: [
-                      if (_motor == MotorMapaSelector.mapaCallesSinApiKey)
-                        FlutterMap(
-                          mapController: _controladorOsm,
-                          options: MapOptions(
-                            initialCenter: osm.LatLng(_latitud, _longitud),
-                            initialZoom: 14.0,
-                            onTap: (_, punto) {
-                              unawaited(
-                                _actualizarCoordenadas(
-                                  punto.latitude,
-                                  punto.longitude,
-                                ),
-                              );
-                            },
-                          ),
-                          children: [
-                            TileLayer(
-                              urlTemplate:
-                                  'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-                              userAgentPackageName:
-                                  'com.constructoradelsur.app',
-                            ),
-                            MarkerLayer(
-                              markers: [
-                                Marker(
-                                  point: osm.LatLng(_latitud, _longitud),
-                                  width: 48,
-                                  height: 48,
-                                  child: const Icon(
-                                    Icons.location_on,
-                                    color: Colors.red,
-                                    size: 42,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ],
-                        )
-                      else
-                        gmaps.GoogleMap(
-                          initialCameraPosition: gmaps.CameraPosition(
-                            target: gmaps.LatLng(_latitud, _longitud),
-                            zoom: 14,
-                          ),
-                          onMapCreated: (ctrl) => _controladorGoogleMap = ctrl,
-                          markers: {
-                            gmaps.Marker(
-                              markerId:
-                                  const gmaps.MarkerId('obra_seleccionada'),
-                              position: gmaps.LatLng(_latitud, _longitud),
-                              draggable: true,
-                              onDragEnd: (pos) {
-                                unawaited(
-                                  _actualizarCoordenadas(
-                                    pos.latitude,
-                                    pos.longitude,
-                                  ),
-                                );
-                              },
-                              infoWindow: gmaps.InfoWindow(
-                                title: _controladorDireccion.text,
-                                snippet:
-                                    '${_latitud.toStringAsFixed(4)}, ${_longitud.toStringAsFixed(4)}',
-                              ),
-                            ),
-                          },
-                          onTap: (pos) {
+                      FlutterMap(
+                        mapController: _controladorMapa,
+                        options: MapOptions(
+                          initialCenter: osm.LatLng(_latitud, _longitud),
+                          initialZoom: 14.0,
+                          onTap: (_, punto) {
                             unawaited(
                               _actualizarCoordenadas(
-                                pos.latitude,
-                                pos.longitude,
+                                punto.latitude,
+                                punto.longitude,
                               ),
                             );
                           },
-                          myLocationButtonEnabled: false,
-                          zoomControlsEnabled: true,
                         ),
+                        children: [
+                          TileLayer(
+                            urlTemplate:
+                                'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                            userAgentPackageName: 'com.constructoradelsur.app',
+                          ),
+                          MarkerLayer(
+                            markers: [
+                              Marker(
+                                point: osm.LatLng(_latitud, _longitud),
+                                width: 48,
+                                height: 48,
+                                child: const Icon(
+                                  Icons.location_on,
+                                  color: Colors.red,
+                                  size: 42,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
                       Positioned(
                         left: 8,
                         right: 8,
@@ -278,7 +191,7 @@ class _SelectorUbicacionMapaDialogState
               ],
               const SizedBox(height: 10),
               const Text(
-                'Tocá cualquier punto en el mapa para transcribir el nombre del lugar o elegí una zona rápida:',
+                'Tocá cualquier punto en el mapa para obtener la dirección o elegí una zona rápida:',
                 style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 6),
@@ -309,7 +222,7 @@ class _SelectorUbicacionMapaDialogState
               TextField(
                 controller: _controladorDireccion,
                 decoration: const InputDecoration(
-                  labelText: 'Lugar / Dirección transcrita de las coordenadas',
+                  labelText: 'Dirección o referencia de la obra',
                   prefixIcon: Icon(Icons.map),
                   border: OutlineInputBorder(),
                 ),

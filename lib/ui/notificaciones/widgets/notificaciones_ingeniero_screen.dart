@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 
+import '../../../domain/models/formato_fecha.dart';
 import '../view_models/notificaciones_view_model.dart';
 
 /// Apartado exclusivo del Ingeniero para:
-/// 1. Programar el horario del recordatorio diario de sincronización para su
-///    equipo de obra (se dispara únicamente si hay informes sin sincronizar).
+/// 1. Programar el horario (formato 24hs) del recordatorio diario de
+///    sincronización para su equipo de obra (se dispara únicamente si hay
+///    informes sin sincronizar).
 /// 2. Consultar el historial de alertas proactivas emitidas cuando una obra
 ///    pasa a estado Amarillo (Demorada) o Rojo (Con problemas).
 class NotificacionesIngenieroScreen extends StatefulWidget {
@@ -27,7 +29,13 @@ class _NotificacionesIngenieroScreenState
     final seleccionado = await showTimePicker(
       context: context,
       initialTime: TimeOfDay(hour: actual.hora, minute: actual.minuto),
-      helpText: 'Horario del recordatorio diario de sincronización',
+      helpText: 'Horario del recordatorio diario (24 hs)',
+      builder: (context, child) {
+        return MediaQuery(
+          data: MediaQuery.of(context).copyWith(alwaysUse24HourFormat: true),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
     );
     if (seleccionado == null || !mounted) return;
 
@@ -98,6 +106,7 @@ class _NotificacionesIngenieroScreenState
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
                         FilledButton.tonalIcon(
+                          key: const Key('btn_modificar_horario_recordatorio'),
                           onPressed: _cambiarHorarioRecordatorio,
                           icon: const Icon(Icons.access_time),
                           label: const Text('Modificar horario'),
@@ -143,7 +152,7 @@ class _NotificacionesIngenieroScreenState
                       ),
                     ),
                     subtitle: Text(
-                      '${item.mensaje}\nPara: ${item.destinatario} · ${item.fechaHora.toIso8601String().substring(0, 16)}',
+                      '${item.mensaje}\nPara: ${item.destinatario} · ${formatearFechaHoraCorta(item.fechaHora)}',
                       style: const TextStyle(fontSize: 12),
                     ),
                   ),

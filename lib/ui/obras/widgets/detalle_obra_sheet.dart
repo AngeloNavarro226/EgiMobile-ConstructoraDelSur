@@ -1,7 +1,9 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
+import '../../../domain/models/formato_fecha.dart';
 import '../../../domain/models/obra.dart';
 import '../../../plataforma/capacidades.dart';
 import '../../core/semaforo.dart';
@@ -16,6 +18,7 @@ Future<void> mostrarDialogoAgregarTarea({
   required Obra obra,
   required ObrasViewModel viewModel,
 }) async {
+  if (obra.finalizada) return;
   await showDialog<void>(
     context: context,
     builder: (_) => _DialogoAgregarTarea(
@@ -96,6 +99,7 @@ Future<void> mostrarDialogoAgregarMaterial({
   required Obra obra,
   required ObrasViewModel viewModel,
 }) async {
+  if (obra.finalizada) return;
   await showDialog<void>(
     context: context,
     builder: (_) => _DialogoAgregarMaterial(
@@ -321,6 +325,7 @@ Future<void> mostrarDialogoModificarEstadoTareas({
       listenable: viewModel,
       builder: (context, _) {
         final obraActualizada = viewModel.obtenerObraPorId(obra.id) ?? obra;
+        final edicionHabilitada = permiteEdicion && !obraActualizada.finalizada;
         final completas = obraActualizada.tareasCompletas;
         final pendientes = obraActualizada.tareasPendientes;
 
@@ -356,7 +361,7 @@ Future<void> mostrarDialogoModificarEstadoTareas({
                       contentPadding: EdgeInsets.zero,
                       leading: Checkbox(
                         value: t.completada,
-                        onChanged: permiteEdicion
+                        onChanged: edicionHabilitada
                             ? (_) {
                                 unawaited(
                                   viewModel.alternarTareaCompletada(
@@ -371,7 +376,7 @@ Future<void> mostrarDialogoModificarEstadoTareas({
                       subtitle: Text(
                         t.id == obraActualizada.tareaActualObj?.id
                             ? 'Tarea actual en curso'
-                            : (permiteEdicion
+                            : (edicionHabilitada
                                 ? 'Tocá el casillero para marcar como completada'
                                 : 'Pendiente'),
                         style: TextStyle(
@@ -381,9 +386,8 @@ Future<void> mostrarDialogoModificarEstadoTareas({
                               : null,
                         ),
                       ),
-                      trailing: viewModel.puedeElegirTareaActual(
-                        obraActualizada,
-                      )
+                      trailing: edicionHabilitada &&
+                              viewModel.puedeElegirTareaActual(obraActualizada)
                           ? IconButton(
                               tooltip:
                                   t.id == obraActualizada.tareaActualObj?.id
@@ -433,13 +437,13 @@ Future<void> mostrarDialogoModificarEstadoTareas({
                           decoration: TextDecoration.lineThrough,
                         ),
                       ),
-                      subtitle: permiteEdicion
+                      subtitle: edicionHabilitada
                           ? const Text(
                               'Tocá para volver a pendiente',
                               style: TextStyle(fontSize: 11),
                             )
                           : null,
-                      onChanged: permiteEdicion
+                      onChanged: edicionHabilitada
                           ? (_) {
                               unawaited(
                                 viewModel.alternarTareaCompletada(
@@ -455,7 +459,7 @@ Future<void> mostrarDialogoModificarEstadoTareas({
             ),
           ),
           actions: [
-            if (permiteEdicion)
+            if (edicionHabilitada)
               TextButton.icon(
                 onPressed: () {
                   unawaited(
@@ -486,6 +490,7 @@ Future<void> mostrarDialogoCambiarSemaforo({
   required Obra obra,
   required ObrasViewModel viewModel,
 }) async {
+  if (obra.finalizada) return;
   await showDialog<void>(
     context: context,
     builder: (dialogContext) => AlertDialog(
@@ -501,9 +506,20 @@ Future<void> mostrarDialogoCambiarSemaforo({
                   ? const Icon(Icons.check_circle, color: Colors.green)
                   : null,
               onTap: () async {
+                unawaited(HapticFeedback.selectionClick());
                 await viewModel.cambiarEstadoSemaforo(obra.id, estado);
                 if (dialogContext.mounted) {
                   Navigator.pop(dialogContext);
+                }
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        'Semáforo actualizado a ${estado.etiqueta}',
+                      ),
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
                 }
               },
             ),
@@ -581,7 +597,7 @@ class _DetalleObraEnriquecidoSheetState
                       valor: obra.ingenieroNombre!,
                     ),
                   _FilaDato(
-                    etiqueta: 'Ubicación (Google Maps)',
+                    etiqueta: 'Ubicación',
                     valor: obra.ubicacion.etiquetaCompleta,
                   ),
                   _FilaDato(
@@ -608,7 +624,7 @@ class _DetalleObraEnriquecidoSheetState
                   if (ultimo != null) ...[
                     const Divider(),
                     Text(
-                      'Último reporte diario (${ultimo.fechaCreacionLocal.toIso8601String().substring(0, 16)}):',
+                      'Último reporte diario (${formatearFechaHoraCorta(ultimo.fechaCreacionLocal)}):',
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 4),
@@ -670,7 +686,7 @@ class _DetalleObraEnriquecidoSheetState
                                       const SizedBox(width: 8),
                                       Expanded(
                                         child: Text(
-                                          '${rep.tareaSeleccionada} (${rep.fechaCreacionLocal.toIso8601String().substring(0, 10)})',
+                                          '${rep.tareaSeleccionada} · ${formatearFechaHoraCorta(rep.fechaCreacionLocal)}',
                                           style: const TextStyle(
                                             fontWeight: FontWeight.bold,
                                             fontSize: 13,
@@ -716,6 +732,55 @@ class _DetalleObraEnriquecidoSheetState
     );
   }
 
+  Future<void> _copiarDireccion(BuildContext context, Obra obra) async {
+    await Clipboard.setData(ClipboardData(text: obra.ubicacion.direccion));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Dirección copiada al portapapeles'),
+        duration: Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _confirmarReabrirObra(BuildContext context, Obra obra) async {
+    final confirmar = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('¿Reabrir "${obra.nombre}"?'),
+        content: const Text(
+          'La obra dejará de estar finalizada, volverá a la vista de obras activas y permitirá modificar semáforos, tareas y cargar nuevos informes.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton.icon(
+            key: const Key('btn_confirmar_reabrir_obra'),
+            onPressed: () => Navigator.pop(dialogContext, true),
+            icon: const Icon(Icons.lock_open_outlined, size: 18),
+            label: const Text('Reabrir obra'),
+          ),
+        ],
+      ),
+    );
+    if (confirmar != true || !context.mounted) return;
+    final ok = await viewModel.cambiarObraFinalizada(
+      obra.id,
+      finalizada: false,
+    );
+    if (!context.mounted) return;
+    if (ok) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content:
+              Text('"${obra.nombre}" fue reabierta y volvió a obras activas.'),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -728,6 +793,9 @@ class _DetalleObraEnriquecidoSheetState
             child: Center(child: Text('Obra no encontrada')),
           );
         }
+
+        final puedeEditarObra = permiteEdicion && !obra.finalizada;
+        final colores = Theme.of(context).colorScheme;
 
         return SafeArea(
           child: Padding(
@@ -757,9 +825,22 @@ class _DetalleObraEnriquecidoSheetState
                     ],
                   ),
                   const SizedBox(height: 4),
-                  Text(
-                    'Responsable: ${obra.responsableNombre} · ${obra.ubicacion.direccion}',
-                    style: Theme.of(context).textTheme.bodySmall,
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Responsable: ${obra.responsableNombre} · ${obra.ubicacion.direccion}',
+                          style: Theme.of(context).textTheme.bodySmall,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: 'Copiar dirección',
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.copy_outlined, size: 18),
+                        onPressed: () =>
+                            unawaited(_copiarDireccion(context, obra)),
+                      ),
+                    ],
                   ),
                   const Divider(),
                   ListTile(
@@ -767,7 +848,8 @@ class _DetalleObraEnriquecidoSheetState
                     leading: const Icon(Icons.construction),
                     title: Text(obra.tareaActual),
                     subtitle: const Text('Tarea actual en curso'),
-                    trailing: viewModel.puedeElegirTareaActual(obra)
+                    trailing: puedeEditarObra &&
+                            viewModel.puedeElegirTareaActual(obra)
                         ? TextButton.icon(
                             onPressed: () {
                               unawaited(
@@ -782,7 +864,8 @@ class _DetalleObraEnriquecidoSheetState
                             label: const Text('Cambiar'),
                           )
                         : null,
-                    onTap: viewModel.puedeElegirTareaActual(obra)
+                    onTap: puedeEditarObra &&
+                            viewModel.puedeElegirTareaActual(obra)
                         ? () {
                             unawaited(
                               mostrarDialogoElegirTareaActual(
@@ -802,7 +885,9 @@ class _DetalleObraEnriquecidoSheetState
                           ? 'Sin observaciones'
                           : obra.observaciones,
                     ),
-                    subtitle: const Text('Observaciones del último reporte'),
+                    subtitle: Text(
+                      'Último reporte: ${formatearFechaHoraCorta(obra.fechaUltimoReporte)}',
+                    ),
                   ),
                   const SizedBox(height: 6),
                   Row(
@@ -849,20 +934,73 @@ class _DetalleObraEnriquecidoSheetState
                               context: context,
                               obra: obra,
                               viewModel: viewModel,
-                              permiteEdicion: permiteEdicion,
+                              permiteEdicion: puedeEditarObra,
                             ),
                           );
                         },
                         icon: const Icon(Icons.checklist, size: 18),
                         label: Text(
-                          permiteEdicion
+                          puedeEditarObra
                               ? 'Modificar estado de tareas'
                               : 'Ver tareas completas y pendientes',
                         ),
                       ),
                     ],
                   ),
-                  if (permiteEdicion) ...[
+                  if (obra.finalizada) ...[
+                    const Divider(height: 28),
+                    Card(
+                      key: const Key('card_obra_finalizada_solo_lectura'),
+                      margin: EdgeInsets.zero,
+                      color: colores.surfaceContainerHighest,
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Icon(
+                                  Icons.lock_outline,
+                                  size: 20,
+                                  color: colores.primary,
+                                ),
+                                const SizedBox(width: 8),
+                                const Expanded(
+                                  child: Text(
+                                    'Obra finalizada (modo solo lectura)',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              permiteEdicion
+                                  ? 'No se pueden cambiar el semáforo, modificar tareas ni cargar informes nuevos mientras esté finalizada. Si necesitás retomarla, podés reabrirla.'
+                                  : 'Esta obra se encuentra finalizada y solo admite consulta de historial e informes.',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                            if (permiteEdicion) ...[
+                              const SizedBox(height: 12),
+                              FilledButton.tonalIcon(
+                                key: const Key('btn_reabrir_obra'),
+                                onPressed: viewModel.guardando
+                                    ? null
+                                    : () => unawaited(
+                                          _confirmarReabrirObra(context, obra),
+                                        ),
+                                icon: const Icon(Icons.lock_open_outlined),
+                                label: const Text('Reabrir obra'),
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                    ),
+                  ] else if (puedeEditarObra) ...[
                     const Divider(height: 28),
                     const Text(
                       'Acciones operativas sobre la obra',
@@ -872,11 +1010,13 @@ class _DetalleObraEnriquecidoSheetState
                     SizedBox(
                       width: double.infinity,
                       child: SegmentedButton<EstadoObra>(
+                        key: const Key('segmented_semaforo_detalle'),
                         showSelectedIcon: false,
                         segments: [
                           for (final estado in EstadoObra.values)
                             ButtonSegment(
                               value: estado,
+                              icon: Semaforo(estado, size: 12),
                               label: Text(
                                 estado.etiqueta,
                                 style: const TextStyle(fontSize: 12),
@@ -885,8 +1025,23 @@ class _DetalleObraEnriquecidoSheetState
                         ],
                         selected: {obra.estado},
                         onSelectionChanged: (s) {
+                          final elegido = s.first;
+                          unawaited(HapticFeedback.selectionClick());
                           unawaited(
-                            viewModel.cambiarEstadoSemaforo(obra.id, s.first),
+                            viewModel
+                                .cambiarEstadoSemaforo(obra.id, elegido)
+                                .then((_) {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'Semáforo actualizado a ${elegido.etiqueta}',
+                                    ),
+                                    duration: const Duration(seconds: 2),
+                                  ),
+                                );
+                              }
+                            }),
                           );
                         },
                       ),
@@ -896,19 +1051,6 @@ class _DetalleObraEnriquecidoSheetState
                       spacing: 8,
                       runSpacing: 8,
                       children: [
-                        OutlinedButton.icon(
-                          onPressed: () {
-                            unawaited(
-                              mostrarDialogoModificarEstadoTareas(
-                                context: context,
-                                obra: obra,
-                                viewModel: viewModel,
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.task_alt),
-                          label: const Text('Estado de tareas'),
-                        ),
                         OutlinedButton.icon(
                           onPressed: () {
                             unawaited(
@@ -936,6 +1078,7 @@ class _DetalleObraEnriquecidoSheetState
                           label: const Text('Añadir material'),
                         ),
                         FilledButton.icon(
+                          key: const Key('btn_detalle_realizar_informe'),
                           onPressed: () {
                             unawaited(
                               Navigator.push(

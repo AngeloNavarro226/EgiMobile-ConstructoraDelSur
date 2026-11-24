@@ -13,6 +13,7 @@ import 'package:constructora_del_sur/data/services/sincronizacion_service.dart';
 import 'package:constructora_del_sur/data/services/supabase_remote_service.dart';
 import 'package:constructora_del_sur/data/services/voz_a_texto_service.dart';
 import 'package:constructora_del_sur/domain/models/evento_de_app.dart';
+import 'package:constructora_del_sur/domain/models/formato_fecha.dart';
 import 'package:constructora_del_sur/domain/models/horarios.dart';
 import 'package:constructora_del_sur/domain/models/obra.dart';
 import 'package:constructora_del_sur/domain/models/plantilla_obra.dart';
@@ -1598,6 +1599,141 @@ void main() {
       );
 
       await remoto.dispose();
+    },
+  );
+
+  test(
+    'formato_fecha formatea fechas 24hs, tiempos relativos y normaliza búsquedas sin tildes',
+    () {
+      final ahora = DateTime(2026, 11, 23, 18, 0);
+      expect(
+        formatearFechaHoraCorta(DateTime(2026, 11, 23, 9, 5)),
+        '23/11/2026 09:05 hs',
+      );
+      expect(
+        formatearTiempoRelativo(DateTime(2026, 11, 23, 14, 30), ahora: ahora),
+        'Hoy 14:30',
+      );
+      expect(
+        formatearTiempoRelativo(DateTime(2026, 11, 22, 16, 15), ahora: ahora),
+        'Ayer 16:15',
+      );
+      expect(
+        formatearTiempoRelativo(DateTime(2026, 11, 20, 10, 0), ahora: ahora),
+        'Hace 3 días',
+      );
+      expect(
+        formatearTiempoRelativo(DateTime(2026, 11, 1, 10, 0), ahora: ahora),
+        '01/11/2026',
+      );
+      expect(normalizarTextoBusqueda('  Hormigón Ñandú Árbol  '),
+          'hormigon nandu arbol');
+    },
+  );
+
+  test(
+    'ObrasViewModel soporta búsqueda ampliada sin tildes, ordenamiento y bloqueo solo lectura en finalizadas con reapertura',
+    () async {
+      final bus = BusDeEventos();
+      final reloj = RelojFijo(DateTime.utc(2026, 11, 23, 12, 0));
+      final db = BaseDatosLocalService(reloj: reloj);
+      final authRepo = AutenticacionRepository(
+        baseDatosService: db,
+        busDeEventos: bus,
+      );
+      final obrasRepo = ObrasRepository(
+        baseDatosService: db,
+        reloj: reloj,
+        busDeEventos: bus,
+      );
+      final notifFalsas = NotificacionesFalsas();
+      final notifRepo = NotificacionesRepository(
+        baseDatosService: db,
+        notificacionesSistemaService: notifFalsas,
+        autenticacionRepository: authRepo,
+        busDeEventos: bus,
+      );
+      final vm = ObrasViewModel(
+        obrasRepository: obrasRepo,
+        autenticacionRepository: authRepo,
+        notificacionesRepository: notifRepo,
+        sincronizacionService: SincronizacionService(),
+        multimediaService: MultimediaService(),
+        vozATextoService: VozATextoService(),
+        mapaService: MapaService(),
+        politicas: const PoliticasFalsas(),
+        busDeEventos: bus,
+        reloj: reloj,
+      );
+
+      await authRepo.iniciarSesion(
+        identificador: 'ingeniero',
+        contrasenia: '1234',
+      );
+      await vm.cargar(forzarRecarga: true);
+
+      // Orden por urgencia: Rojo (problemas) primero
+      vm.cambiarOrdenObras(OrdenObras.urgenciaSemaforo);
+      expect(vm.obrasFiltradas.first.estado, EstadoObra.problemas);
+
+      // Orden alfabético A-Z
+      vm.cambiarOrdenObras(OrdenObras.nombreAZ);
+      final nombres =
+          vm.obrasFiltradas.map((o) => o.nombre.toLowerCase()).toList();
+      final ordenados = List<String>.from(nombres)..sort();
+      expect(nombres, ordenados);
+
+      // Búsqueda ampliada sin tildes por ubicación / responsable
+      vm.actualizarBusqueda('lujan');
+      expect(vm.obrasFiltradas, isNotEmpty);
+      expect(vm.tieneFiltrosActivos, isTrue);
+
+      vm.limpiarFiltrosYBusqueda();
+      expect(vm.tieneFiltrosActivos, isFalse);
+
+      // Finalizar obra -> pasa a modo solo lectura (bloquea semáforo, tareas e informes)
+      final objetivo = vm.obrasFiltradas.first;
+      final tareasAntes = objetivo.tareas.length;
+      final reportesAntes = vm.reportes.length;
+      final okFin =
+          await vm.cambiarObraFinalizada(objetivo.id, finalizada: true);
+      expect(okFin, isTrue);
+      expect(vm.obtenerObraPorId(objetivo.id)!.finalizada, isTrue);
+
+      final estadoFinalizado = vm.obtenerObraPorId(objetivo.id)!.estado;
+      final nuevoEstadoIntentado = estadoFinalizado == EstadoObra.problemas
+          ? EstadoObra.aTiempo
+          : EstadoObra.problemas;
+      await vm.cambiarEstadoSemaforo(objetivo.id, nuevoEstadoIntentado);
+      expect(vm.obtenerObraPorId(objetivo.id)!.estado, estadoFinalizado);
+
+      await vm.agregarTareaAObra(objetivo.id, 'Tarea bloqueada');
+      expect(vm.obtenerObraPorId(objetivo.id)!.tareas.length, tareasAntes);
+
+      await vm.guardarInformeDiario(
+        obra: vm.obtenerObraPorId(objetivo.id)!,
+        tareaSeleccionada: objetivo.tareaActual,
+        marcarTareaComoCompletada: true,
+        materialesGastados: const [],
+        observaciones: 'No debería guardarse',
+        estadoSemaforo: EstadoObra.aTiempo,
+        fotosAdjuntas: const [],
+      );
+      expect(vm.reportes.length, reportesAntes);
+      expect(vm.mensajeError, isNotNull);
+
+      // Reabrir obra -> vuelve a estar activa y editable
+      final okReabrir =
+          await vm.cambiarObraFinalizada(objetivo.id, finalizada: false);
+      expect(okReabrir, isTrue);
+      expect(vm.obtenerObraPorId(objetivo.id)!.finalizada, isFalse);
+
+      await vm.cambiarEstadoSemaforo(objetivo.id, nuevoEstadoIntentado);
+      expect(vm.obtenerObraPorId(objetivo.id)!.estado, nuevoEstadoIntentado);
+
+      vm.dispose();
+      await notifFalsas.dispose();
+      await bus.dispose();
     },
   );
 }
