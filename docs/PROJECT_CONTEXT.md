@@ -1,7 +1,7 @@
 # Contexto Compacto del Proyecto — Constructora Del Sur (`proyectoegi`)
 
 > **Propósito:** Memoria técnica compacta del proyecto (equivalente a `/compact`). Todo agente en Google Antigravity debe usar este documento como base de verdad del estado actual y del roadmap hacia producción.
-> **Última actualización:** 2026-11-22 · **Versión actual:** `2.3.0+1` (paquete `constructora_del_sur`, carpeta raíz `proyectoegi/`).
+> **Última actualización:** 2026-11-23 · **Versión actual:** `2.3.0+1` (paquete `constructora_del_sur`, carpeta raíz `proyectoegi/`).
 
 ---
 
@@ -57,22 +57,22 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 
 ### Esquema Remoto en Supabase (`EgiMobile`, `cgczsdbidvqykigxbgxg`, Postgres 17)
 
-- **11 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created`, y helpers RLS en esquema `private`: `roles`, `usuarios` (`fcm_token`), `obras` (`responsable_id`, `ingeniero_id`, `tarea_actual_id`), `tareas_obra`, `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`), `notificaciones` (`emisor_id`, `push_enviado`), `catalogo_plantillas`, `configuracion_recordatorio` (`ingeniero_id` PK, RLS: ingeniero edita la propia, capataz lee la de los ingenieros de sus obras, dueño lee todas).
-- **Edge Function FCM (`supabase/functions/enviar-push-fcm/index.ts`):** resuelve destinatarios en servidor (Capataz → Ingeniero a cargo + Dueño; Ingeniero → Capataz a cargo + Dueño), garantiza idempotencia vía `push_enviado` y despacha con FCM HTTP v1 API usando `FIREBASE_SERVICE_ACCOUNT_JSON`.
+- **11 tablas en `public`** con `RLS` habilitado, índices FK/`updated_at`, triggers `actualizar_updated_at()` + `on_auth_user_created` + resolución de conflictos LWW (`a_trg_obras_resolver_conflicto_lww` y `a_trg_tareas_obra_resolver_conflicto_lww` sobre `client_updated_at` con merge monotónico de `finalizada`, `con_foto` y `fecha_ultimo_reporte`), y helpers RLS en esquema `private`: `roles`, `usuarios` (`fcm_token`), `obras` (`responsable_id`, `ingeniero_id`, `tarea_actual_id`, `client_updated_at`), `tareas_obra` (`client_updated_at`), `obra_materiales`, `reportes_diarios`, `reporte_materiales`, `reporte_fotos` (`peso_kb <= 200`, `storage_path`), `notificaciones` (`emisor_id`, `push_enviado`), `catalogo_plantillas`, `configuracion_recordatorio` (`ingeniero_id` PK, RLS: ingeniero edita la propia, capataz lee la de los ingenieros de sus obras, dueño lee todas).
+- **Edge Function FCM (`supabase/functions/enviar-push-fcm/index.ts`):** desplegada (`ACTIVE`), resuelve destinatarios en servidor (Capataz → Ingeniero a cargo + Dueño; Ingeniero → Capataz a cargo + Dueño), garantiza idempotencia vía `push_enviado` y despacha con FCM HTTP v1 API usando `FIREBASE_SERVICE_ACCOUNT_JSON`.
 - **Storage:** bucket privado `fotos-obras` (`file_size_limit = 204800`, JPEG/PNG/WebP) con políticas RLS por rol.
 - **Realtime:** publicación `supabase_realtime` habilitada para `obras`, `tareas_obra`, `reportes_diarios`, `reporte_fotos`, `notificaciones`, `catalogo_plantillas` y `configuracion_recordatorio`.
-- **Android (`applicationId`):** `com.constructoradelsur.egimobile` en `android/app/build.gradle.kts` (plugin `com.google.gms.google-services` se activa automáticamente al añadir `android/app/google-services.json`); `RecordatorioAlarmas.kt` + `RecordatorioReceiver.kt` + `RecordatorioBootReceiver.kt` persisten la alarma en `SharedPreferences` y consultan SQLite antes de notificar.
+- **Android (`applicationId`):** `com.constructoradelsur.egimobile` en `android/app/build.gradle.kts` (Firebase proyecto `egimobile-fc985`, `google-services.json` local ignorado en Git); `BaseDatosLocalService` usa `WAL` + `busy_timeout = 5000`; `RecordatorioAlarmas.kt` + `RecordatorioReceiver.kt` + `RecordatorioBootReceiver.kt` usan `setAndAllowWhileIdle` (reprogramando el día siguiente) y leen SQLite WAL antes de notificar.
 
 ---
 
 ## 4. Estado de Calidad y Red de Seguridad Actual
 
 - `analysis_options.yaml` exige 5 reglas extra sobre `flutter_lints`: `always_declare_return_types`, `directives_ordering`, `prefer_const_constructors`, `prefer_single_quotes`, `unawaited_futures` (`page_width: 80`).
-- **Tests existentes (4 archivos, 22 pruebas en verde):**
-  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota`, `FakeServicioAutenticacionRemota`, `FakeServicioPushFcm`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
+- **Tests existentes (4 archivos, 25 pruebas en verde):**
+  - `test/fakes.dart`: `RelojFijo`, `GeneradorIdsSecuencial`, `FakeFuenteDatosRemota` (con modo `resolverConflictosLww`), `FakeServicioAutenticacionRemota`, `FakeServicioPushFcm`, `BaseDatosLocalConError`, `NotificacionesFalsas`, `CapacidadesFalsas`, `PoliticasFalsas`.
   - `test/plataforma_test.dart`: capacidades/políticas Android, iOS y Linux.
-  - `test/caracterizacion_y_dominio_test.dart`: dominio de `Obra`, autenticación + sesión offline + Supabase Auth + ciclo de vida `fcm_token`, mapeo SQLite↔Postgres, roles 1:N + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins*, Realtime, catálogo de plantillas + tarea actual, destinatarios FCM por rol emisor (Capataz vs Ingeniero), recordatorio por ingeniero + horario más temprano en Capataz + `SharedPreferences`, auditoría de ViewModels, horarios y `Workmanager`.
-  - `test/widget_test.dart`: `LoginScreen`, `PerfilScreen`, `DetalleObraEnriquecidoSheet`, y `NotificacionesIngenieroScreen` (sin envío manual + switch de recordatorio diario).
+  - `test/caracterizacion_y_dominio_test.dart`: dominio de `Obra`, autenticación + sesión offline + Supabase Auth + ciclo de vida `fcm_token`, mapeo SQLite↔Postgres (`client_updated_at`), roles 1:N + integridad FK/3FN, `MotorSincronizacion` Push → Pull + fotos + *local-pending wins* + resolución de conflictos offline LWW, Realtime, catálogo de plantillas + tarea actual, destinatarios FCM por rol emisor (Capataz vs Ingeniero), recordatorio por ingeniero + horario más temprano en Capataz + `SharedPreferences`, auditoría de ViewModels, horarios y `Workmanager`.
+  - `test/widget_test.dart`: `LoginScreen`, `PerfilScreen`, `DetalleObraEnriquecidoSheet`, `NotificacionesIngenieroScreen` (sin envío manual + switch de recordatorio diario), `AgregarObraScreen` (sin overflow en 360px) y `CrearInformeScreen` (guardado como Capataz).
 
 ---
 
@@ -82,8 +82,8 @@ Arquitectura en **3 capas estrictas (MVVM + Repository)** con inyección de depe
 | :--- | :--- | :--- | :--- |
 | **Fase 0** | **Preparación Offline-First y Escalabilidad Local:** Esquema normalizado (`onUpgrade`), `telefono`, `roles 1:N`, UUID v4, `FuenteDatosRemota`, `MotorSincronizacion`, `ViewModelBase` | **Completado** | `refactoring_safe` |
 | **Fase 1** | **Supabase como BD principal + Offline-First:** Tablas PostgreSQL + RLS + bucket `fotos-obras` + Auth + `SupabaseRemoteService` en `EgiMobile` (`cgczsdbidvqykigxbgxg`) | **Completado** | `supabase-offline-first` |
-| **Fase 2** | **Sincronización real en producción:** `Workmanager` + `connectivity_plus` + `AppLifecycleListener` + Realtime | **Completado** *(pendiente prueba manual en dispositivo real)* | `sync-engine-implementation` |
-| **Fase 3** | **Notificaciones Push reales (Firebase FCM) + Recordatorio por Ingeniero:** `firebase_core` + `firebase_messaging`, `FirebaseNotificacionesService`, destinatarios por rol emisor, `configuracion_recordatorio` por `ingeniero_id` (horario más temprano en capataz + disparo solo con pendientes + `SharedPreferences` + `BOOT_COMPLETED`), migración Supabase + `enviar-push-fcm` y eliminación de envío manual | **Implementado** *(pendiente crear proyecto `EgiMobile` en Firebase Console, copiar `google-services.json`, desplegar `enviar-push-fcm` y cargar secret `FIREBASE_SERVICE_ACCOUNT_JSON`)* | `firebase-push-notifications` |
+| **Fase 2** | **Sincronización real en producción:** `Workmanager` + `connectivity_plus` + `AppLifecycleListener` + Realtime + LWW por `client_updated_at` | **Completado** | `sync-engine-implementation` |
+| **Fase 3** | **Notificaciones Push reales (Firebase FCM) + Recordatorio por Ingeniero:** FCM en producción (`egimobile-fc985`, `enviar-push-fcm` activo, `FIREBASE_SERVICE_ACCOUNT_JSON` configurado), destinatarios por rol emisor, `configuracion_recordatorio` por `ingeniero_id` con `setAndAllowWhileIdle` + lectura SQLite WAL | **Completado** | `firebase-push-notifications` |
 | **Fase 4** | **Limpieza de UI de versión de prueba:** Quitar `_TarjetaUsuariosPrueba` y `_autocompletarCredencialPrueba` de `login_screen.dart`, quitar botones de simulación y semillas demo en producción, y actualizar `test/widget_test.dart` | Pendiente | `ui-production-cleanup` |
 
 ---

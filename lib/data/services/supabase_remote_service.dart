@@ -445,6 +445,7 @@ Map<String, dynamic> mapearObraLocalARemoto(Map<String, dynamic> local) => {
       'imagen_url': local['imagen_url'],
       'finalizada': _aBooleano(local['finalizada']),
       'deleted_at': local['deleted_at'],
+      if (local['updated_at'] != null) 'client_updated_at': local['updated_at'],
     };
 
 Map<String, dynamic> mapearObraRemotaALocal(Map<String, dynamic> remoto) {
@@ -486,6 +487,7 @@ Map<String, dynamic> mapearTareaLocalARemoto(Map<String, dynamic> local) => {
       'nombre': local['nombre'],
       'completada': _aBooleano(local['completada']),
       'orden': local['orden'] ?? 0,
+      if (local['updated_at'] != null) 'client_updated_at': local['updated_at'],
     };
 
 Map<String, dynamic> mapearTareaRemotaALocal(Map<String, dynamic> remoto) => {

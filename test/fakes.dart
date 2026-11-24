@@ -44,6 +44,7 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
     this.estaDisponible = true,
     this.simularErrorRed = false,
     this.cambiosParaPull = const CambiosRemotos(),
+    this.resolverConflictosLww = false,
   });
 
   @override
@@ -51,6 +52,7 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
 
   bool simularErrorRed;
   CambiosRemotos cambiosParaPull;
+  bool resolverConflictosLww;
 
   final List<String> fotosSubidas = [];
   final Map<String, Map<String, dynamic>> usuariosRemotos = {};
@@ -109,22 +111,89 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
     fcmTokensRemotos[usuarioId] = fcmToken;
   }
 
+  static DateTime _parsearFechaUtc(Object? valor) {
+    if (valor is String && valor.isNotEmpty) {
+      return DateTime.tryParse(valor)?.toUtc() ??
+          DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+    }
+    return DateTime.fromMillisecondsSinceEpoch(0, isUtc: true);
+  }
+
+  static bool _esVerdadero(Object? valor) =>
+      valor is bool ? valor : (valor as int? ?? 0) == 1;
+
   @override
   Future<void> upsertObra({
     required Map<String, dynamic> obra,
     required List<String> materiales,
   }) async {
     _verificarRed();
-    obrasRemotas[obra['id'] as String] = {
-      ...obra,
-      'materiales': List<String>.from(materiales),
-    };
+    final id = obra['id'] as String;
+    final existente = obrasRemotas[id];
+    if (!resolverConflictosLww || existente == null) {
+      obrasRemotas[id] = {
+        ...obra,
+        'materiales': List<String>.from(materiales),
+      };
+      return;
+    }
+
+    final tsExistente = _parsearFechaUtc(
+      existente['client_updated_at'] ?? existente['updated_at'],
+    );
+    final tsEntrante = _parsearFechaUtc(
+      obra['client_updated_at'] ?? obra['updated_at'],
+    );
+    final finalizada = _esVerdadero(existente['finalizada']) ||
+        _esVerdadero(obra['finalizada']);
+    final conFoto =
+        _esVerdadero(existente['con_foto']) || _esVerdadero(obra['con_foto']);
+    final fechaRepExistente =
+        _parsearFechaUtc(existente['fecha_ultimo_reporte']);
+    final fechaRepEntrante = _parsearFechaUtc(obra['fecha_ultimo_reporte']);
+    final fechaUltimoReporte = fechaRepEntrante.isAfter(fechaRepExistente)
+        ? fechaRepEntrante.toIso8601String()
+        : fechaRepExistente.toIso8601String();
+
+    if (tsEntrante.isBefore(tsExistente)) {
+      obrasRemotas[id] = {
+        ...existente,
+        'finalizada': finalizada ? 1 : 0,
+        'con_foto': conFoto ? 1 : 0,
+        'fecha_ultimo_reporte': fechaUltimoReporte,
+        'tarea_actual_id': finalizada ? null : existente['tarea_actual_id'],
+      };
+    } else {
+      obrasRemotas[id] = {
+        ...obra,
+        'materiales': List<String>.from(materiales),
+        'finalizada': finalizada ? 1 : 0,
+        'con_foto': conFoto ? 1 : 0,
+        'fecha_ultimo_reporte': fechaUltimoReporte,
+        'tarea_actual_id': finalizada ? null : obra['tarea_actual_id'],
+      };
+    }
   }
 
   @override
   Future<void> upsertTarea(Map<String, dynamic> tarea) async {
     _verificarRed();
-    tareasRemotas[tarea['id'] as String] = Map<String, dynamic>.from(tarea);
+    final id = tarea['id'] as String;
+    final existente = tareasRemotas[id];
+    if (!resolverConflictosLww || existente == null) {
+      tareasRemotas[id] = Map<String, dynamic>.from(tarea);
+      return;
+    }
+
+    final tsExistente = _parsearFechaUtc(
+      existente['client_updated_at'] ?? existente['updated_at'],
+    );
+    final tsEntrante = _parsearFechaUtc(
+      tarea['client_updated_at'] ?? tarea['updated_at'],
+    );
+    if (!tsEntrante.isBefore(tsExistente)) {
+      tareasRemotas[id] = Map<String, dynamic>.from(tarea);
+    }
   }
 
   @override
@@ -167,7 +236,24 @@ class FakeFuenteDatosRemota implements FuenteDatosRemota {
   @override
   Future<CambiosRemotos> obtenerCambiosDesde(DateTime? ultimaSyncUtc) async {
     _verificarRed();
-    return cambiosParaPull;
+    if (!resolverConflictosLww) {
+      return cambiosParaPull;
+    }
+    return CambiosRemotos(
+      obras: obrasRemotas.values.map((o) {
+        final obraId = o['id'] as String;
+        final tareasDeObra = tareasRemotas.values
+            .where((t) => t['obra_id'] == obraId)
+            .map(Map<String, dynamic>.from)
+            .toList();
+        return {
+          ...o,
+          'tareas': tareasDeObra,
+        };
+      }).toList(),
+      tareas: tareasRemotas.values.map(Map<String, dynamic>.from).toList(),
+      reportes: reportesRemotos.values.map(Map<String, dynamic>.from).toList(),
+    );
   }
 
   @override

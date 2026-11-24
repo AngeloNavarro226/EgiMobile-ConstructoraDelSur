@@ -1452,4 +1452,152 @@ void main() {
       await remoto.dispose();
     },
   );
+
+  test(
+    'Conflicto offline LWW: informe más viejo del Capataz no pisa el estado más reciente del Ingeniero y conserva ambos informes y tareas',
+    () async {
+      // Mapeadores envían client_updated_at para LWW en servidor PostgreSQL
+      final obraPayload = mapearObraLocalARemoto({
+        'id': 'o_lww',
+        'nombre': 'Obra LWW',
+        'estado_semaforo': 'demorada',
+        'fecha_ultimo_reporte': '2026-11-23T10:00:00.000Z',
+        'responsable_id': 'u_capataz',
+        'ingeniero_id': 'u_ingeniero',
+        'ubicacion_latitud': -32.88,
+        'ubicacion_longitud': -68.84,
+        'ubicacion_direccion': 'Mendoza',
+        'observaciones': 'Falta cemento',
+        'con_foto': 1,
+        'finalizada': 0,
+        'updated_at': '2026-11-23T10:00:00.000Z',
+      });
+      expect(obraPayload['client_updated_at'], '2026-11-23T10:00:00.000Z');
+
+      final tareaPayload = mapearTareaLocalARemoto({
+        'id': 't_a',
+        'obra_id': 'o_lww',
+        'nombre': 'Tarea A',
+        'completada': 1,
+        'orden': 0,
+        'updated_at': '2026-11-23T10:00:00.000Z',
+      });
+      expect(tareaPayload['client_updated_at'], '2026-11-23T10:00:00.000Z');
+
+      // Servidor remoto compartido con resolución LWW (espejo del trigger SQL)
+      final remoto = FakeFuenteDatosRemota(resolverConflictosLww: true);
+      final relojCapataz = RelojFijo(DateTime.utc(2026, 11, 23, 10, 0));
+      final relojSyncCapataz = RelojFijo(DateTime.utc(2026, 11, 23, 10, 30));
+      final relojIngeniero = RelojFijo(DateTime.utc(2026, 11, 23, 10, 15));
+
+      final dbCapataz = BaseDatosLocalService(reloj: relojCapataz);
+      final dbIngeniero = BaseDatosLocalService(reloj: relojIngeniero);
+      final motorCapataz = MotorSincronizacion(
+        baseDatosLocal: dbCapataz,
+        fuenteRemota: remoto,
+        reloj: relojSyncCapataz,
+      );
+      final motorIngeniero = MotorSincronizacion(
+        baseDatosLocal: dbIngeniero,
+        fuenteRemota: remoto,
+        reloj: relojIngeniero,
+      );
+      final repoCapataz = ObrasRepository(
+        baseDatosService: dbCapataz,
+        motorSincronizacion: motorCapataz,
+        reloj: relojCapataz,
+      );
+      final repoIngeniero = ObrasRepository(
+        baseDatosService: dbIngeniero,
+        motorSincronizacion: motorIngeniero,
+        reloj: relojIngeniero,
+      );
+
+      final obraBase = (await repoCapataz.obtenerObras()).first;
+      final tareaA = obraBase.tareas[0];
+      final tareaB = obraBase.tareas[1];
+
+      // 10:00 UTC: Capataz SIN internet guarda informe (completa Tarea A, Amarillo, con foto)
+      await repoCapataz.registrarReporteDiario(
+        ReporteDiario(
+          id: 'rep_capataz_1000',
+          obraId: obraBase.id,
+          obraNombre: obraBase.nombre,
+          autorId: 'u_capataz',
+          autorNombre: 'Carlos Méndez',
+          fechaCreacionLocal: relojCapataz.ahora(),
+          tareaSeleccionada: tareaA.nombre,
+          tareaCompletadaEnInforme: true,
+          materialesUsados: const ['Cemento Portland'],
+          observaciones: 'Falta cemento (10:00)',
+          urlFotos: const [
+            FotoComprimida(
+              rutaLocal: 'assets/obra.jpg',
+              origen: 'Cámara en obra',
+              anchoPx: 800,
+              altoPx: 600,
+              calidadPct: 70,
+              pesoKb: 120,
+            ),
+          ],
+          estadoSemaforo: EstadoObra.demorada,
+          syncStatus: EstadoSincronizacion.pending,
+          updatedAt: relojCapataz.ahora(),
+        ),
+      );
+
+      // 10:15 UTC: Ingeniero CON internet guarda informe sobre la misma obra
+      // (completa Tarea B, Rojo, sin foto) y sincroniza inmediatamente.
+      await repoIngeniero.registrarReporteDiario(
+        ReporteDiario(
+          id: 'rep_ingeniero_1015',
+          obraId: obraBase.id,
+          obraNombre: obraBase.nombre,
+          autorId: 'u_ingeniero',
+          autorNombre: 'Ing. Braulio Hormigón',
+          fechaCreacionLocal: relojIngeniero.ahora(),
+          tareaSeleccionada: tareaB.nombre,
+          tareaCompletadaEnInforme: true,
+          materialesUsados: const ['Arena gruesa'],
+          observaciones: 'Falla en losa (10:15)',
+          urlFotos: const [],
+          estadoSemaforo: EstadoObra.problemas,
+          syncStatus: EstadoSincronizacion.pending,
+          updatedAt: relojIngeniero.ahora(),
+        ),
+      );
+      await motorIngeniero.sincronizarTodo(permitirSimulacionLocal: false);
+
+      // 10:30 UTC: Al Capataz le vuelve internet y sincroniza (Push -> Pull)
+      final resCapataz =
+          await motorCapataz.sincronizarTodo(permitirSimulacionLocal: false);
+      expect(resCapataz.tuvoErrores, isFalse);
+
+      // Ambos informes sobreviven sin perderse
+      final reportesFinales =
+          await repoCapataz.obtenerReportes(forzarRecarga: true);
+      expect(
+        reportesFinales.map((r) => r.id),
+        containsAll(['rep_capataz_1000', 'rep_ingeniero_1015']),
+      );
+
+      // En la cabecera de la obra ganó el estado más reciente (Ingeniero 10:15: Rojo),
+      // pero se preservó conFoto=true del informe offline y ambas tareas completas.
+      final obraFinal = (await repoCapataz.obtenerObras(forzarRecarga: true))
+          .firstWhere((o) => o.id == obraBase.id);
+      expect(obraFinal.estado, EstadoObra.problemas);
+      expect(obraFinal.observaciones, 'Falla en losa (10:15)');
+      expect(obraFinal.conFoto, isTrue);
+      expect(
+        obraFinal.tareas.firstWhere((t) => t.id == tareaA.id).completada,
+        isTrue,
+      );
+      expect(
+        obraFinal.tareas.firstWhere((t) => t.id == tareaB.id).completada,
+        isTrue,
+      );
+
+      await remoto.dispose();
+    },
+  );
 }
